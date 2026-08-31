@@ -1,6 +1,7 @@
 from pathlib import Path
+import hashlib
 
-from PySide6.QtCore import Qt, QRectF, Signal
+from PySide6.QtCore import Qt, QTimer, QRectF, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget
@@ -10,6 +11,7 @@ from ui.fonts import figma_font, load_application_fonts
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 ASSETS_DIR = BASE_DIR / "ui" / "assets"
+CREDENTIALS_PATH = BASE_DIR / ".vault_master_hash"
 
 
 class LoginScreen(QWidget):
@@ -17,6 +19,7 @@ class LoginScreen(QWidget):
     DESIGN_W = 1440
     DESIGN_H = 1024
     create_new_vault = Signal()
+    unlocked = Signal()
 
     def __init__(self):
         super().__init__()
@@ -34,9 +37,19 @@ class LoginScreen(QWidget):
         self.protect_icon = self.load_pixmap("login_protect.png")
         self.divider = QSvgRenderer(str(ASSETS_DIR / "login_divider.svg"))
         self.password = ""
+        self.password_cursor = 0
         self.password_visible = False
         self.password_focused = False
+        self.error_message = ""
+        self.password_hovered = False
+        self.unlock_hovered = False
+        self.cursor_visible = True
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
+
+        self.cursor_timer = QTimer(self)
+        self.cursor_timer.timeout.connect(self.blink_cursor)
+        self.cursor_timer.start(500)
 
     def load_pixmap(self, filename):
         return QPixmap(str(ASSETS_DIR / filename))
@@ -99,7 +112,15 @@ class LoginScreen(QWidget):
         painter.setPen(Qt.white)
         painter.drawText(414, 400, "Master Password")
 
-        painter.setPen(QPen(QColor("#1E6CF7"), 1.5))
+        field_color = (
+            QColor("#2E8DE7")
+            if self.password_focused
+            else QColor("#3A7FFF")
+            if self.password_hovered
+            else QColor("#1E6CF7")
+        )
+        field_width = 2 if self.password_focused else 1.5
+        painter.setPen(QPen(field_color, field_width))
         painter.setBrush(QColor("#0B0F1C"))
         painter.drawRoundedRect(QRectF(415.25, 413.25, 608.5, 50.5), 6.25, 6.25)
         painter.drawPixmap(424, 429, 18, 18, self.lock_icon)
@@ -110,9 +131,19 @@ class LoginScreen(QWidget):
         painter.drawText(459, 445, password_text or "Enter your master password")
         painter.drawPixmap(996, 429, 18, 18, self.eye_icon)
 
+        if self.password_focused and self.cursor_visible:
+            caret_x = 459 + painter.fontMetrics().horizontalAdvance(password_text[:self.password_cursor])
+            painter.setPen(QPen(QColor("#F8F6F9"), 1.5))
+            painter.drawLine(caret_x, 427, caret_x, 450)
+
+        if self.error_message:
+            painter.setFont(figma_font("Inter", 13, QFont.Weight.Normal))
+            painter.setPen("#FF4D4F")
+            painter.drawText(414, 478, self.error_message)
+
     def draw_unlock_button(self, painter):
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#1E6CF7"))
+        painter.setBrush(QColor("#2E8DE7") if self.unlock_hovered else QColor("#1E6CF7"))
         painter.drawRoundedRect(QRectF(414.5, 484.5, 610, 66), 7, 7)
         painter.drawPixmap(611, 507, 20, 20, self.lock_icon)
 
@@ -179,7 +210,11 @@ class LoginScreen(QWidget):
             self.setFocus()
             if x >= 978:
                 self.password_visible = not self.password_visible
+            else:
+                self.password_cursor = self._cursor_from_x(x)
             self.update()
+        elif 414.5 <= x <= 1024.5 and 484.5 <= y <= 550.5:
+            self.unlock_vault()
         elif 414.5 <= x <= 1024.5 and 630.5 <= y <= 737.5:
             self.create_new_vault.emit()
         else:
@@ -188,15 +223,96 @@ class LoginScreen(QWidget):
 
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):
+        scale = min(self.width() / self.DESIGN_W, self.height() / self.DESIGN_H)
+        canvas_x = (self.width() - self.DESIGN_W * scale) / 2
+        canvas_y = (self.height() - self.DESIGN_H * scale) / 2
+        x = (event.position().x() - canvas_x) / scale
+        y = (event.position().y() - canvas_y) / scale
+        self.password_hovered = 414.5 <= x <= 1024.5 and 412.5 <= y <= 464.5
+        self.unlock_hovered = 414.5 <= x <= 1024.5 and 484.5 <= y <= 550.5
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def blink_cursor(self):
+        if self.password_focused:
+            self.cursor_visible = not self.cursor_visible
+            self.update()
+
+    def focusOutEvent(self, event):
+        self.password_focused = False
+        self.cursor_visible = True
+        self.update()
+        super().focusOutEvent(event)
+
     def keyPressEvent(self, event):
         if not self.password_focused:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.unlock_vault()
+                return
             return super().keyPressEvent(event)
 
-        if event.key() == Qt.Key.Key_Backspace:
-            self.password = self.password[:-1]
+        modifiers = event.modifiers()
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.unlock_vault()
+            return
+        if event.key() == Qt.Key.Key_Left:
+            self.password_cursor = max(0, self.password_cursor - 1)
+        elif event.key() == Qt.Key.Key_Right:
+            self.password_cursor = min(len(self.password), self.password_cursor + 1)
+        elif event.key() == Qt.Key.Key_Home:
+            self.password_cursor = 0
+        elif event.key() == Qt.Key.Key_End:
+            self.password_cursor = len(self.password)
+        elif event.key() == Qt.Key.Key_Backspace:
+            if self.password_cursor > 0:
+                self.password = self.password[:self.password_cursor - 1] + self.password[self.password_cursor:]
+                self.password_cursor -= 1
+        elif event.key() == Qt.Key.Key_Delete:
+            if self.password_cursor < len(self.password):
+                self.password = self.password[:self.password_cursor] + self.password[self.password_cursor + 1:]
+        elif event.key() == Qt.Key.Key_A and modifiers & Qt.KeyboardModifier.ControlModifier:
+            self.password = ""
+            self.password_cursor = 0
         elif event.text() and event.text().isprintable():
-            self.password += event.text()
+            text = event.text()
+            self.password = self.password[:self.password_cursor] + text + self.password[self.password_cursor:]
+            self.password_cursor += len(text)
         else:
             return super().keyPressEvent(event)
 
+        self.cursor_visible = True
         self.update()
+
+    def _cursor_from_x(self, x):
+        from PySide6.QtGui import QFontMetrics
+        metrics = QFontMetrics(figma_font("Roboto", 14, QFont.Weight.Normal))
+        shown = self.password if self.password_visible else "•" * len(self.password)
+        target = max(0, x - 459)
+        for index in range(len(shown) + 1):
+            if metrics.horizontalAdvance(shown[:index]) >= target:
+                return index
+        return len(shown)
+
+    def unlock_vault(self):
+        stored_hash = ""
+        if CREDENTIALS_PATH.exists():
+            stored_hash = CREDENTIALS_PATH.read_text(encoding="utf-8").strip()
+        entered_hash = hashlib.sha256(self.password.encode("utf-8")).hexdigest()
+
+        if not self.password:
+            self.error_message = "Enter your master password."
+        elif not stored_hash:
+            self.error_message = "No existing vault found. Create a new vault first."
+        elif entered_hash != stored_hash:
+            self.error_message = "Incorrect master password."
+        else:
+            self.error_message = ""
+            self.unlocked.emit()
+
+        self.update()
+
+    @staticmethod
+    def store_master_password(password):
+        password_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+        CREDENTIALS_PATH.write_text(password_hash, encoding="utf-8")

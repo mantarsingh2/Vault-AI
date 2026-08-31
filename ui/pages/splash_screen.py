@@ -24,6 +24,7 @@ class SplashScreen(QWidget):
 
         self.setWindowTitle("Vault AI")
         self.setStyleSheet("background-color: #050B15;")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         # -----------------------------------------
         # WINDOW SIZE
@@ -134,9 +135,14 @@ class SplashScreen(QWidget):
 
         if not self.wave.isNull():
 
+            # Keep the artwork fixed when loading completes.  Only the
+            # progress control should change into the Get Started button.
+            wave_x = -96
+            wave_y = 167
+
             painter.drawPixmap(
-                -96,
-                167,
+                wave_x,
+                wave_y,
                 1672,
                 941,
                 self.wave,
@@ -414,3 +420,9 @@ class SplashScreen(QWidget):
                 self.get_started.emit()
 
         super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        if self.show_get_started and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.get_started.emit()
+            return
+        super().keyPressEvent(event)
