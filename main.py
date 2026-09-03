@@ -2,17 +2,19 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from ui.pages.splash_screen import SplashScreen
-from ui.pages.login_screen import LoginScreen
+from database import initialize_database
 from ui.pages.create_vault_screen import CreateVaultScreen
+from ui.pages.dashboard_screen import DashboardScreen
 from ui.pages.device_security_screen import DeviceSecurityScreen
 from ui.pages.device_verification_screen import DeviceVerificationScreen
-from ui.pages.two_factor_screen import TwoFactorScreen
 from ui.pages.login_risk_screen import LoginRiskScreen
-from ui.pages.dashboard_screen import DashboardScreen
+from ui.pages.login_screen import LoginScreen
+from ui.pages.splash_screen import SplashScreen
+from ui.pages.two_factor_screen import TwoFactorScreen
 
 
 def main():
+    initialize_database()
     app = QApplication(sys.argv)
 
     splash = SplashScreen()
@@ -58,13 +60,18 @@ def main():
             two_factor_screen.show()
         else:
             login_risk_screen.close()
+            dashboard_screen.reload_sessions()
+            dashboard_screen.reload_messages()
             dashboard_screen.resize(login_risk_screen.size())
             dashboard_screen.show()
 
     device_verification_screen.risk_assessed.connect(show_login_risk)
     login_risk_screen.risk_complete.connect(show_two_factor_from_risk)
+
     def show_dashboard_from_two_factor():
         two_factor_screen.close()
+        dashboard_screen.reload_sessions()
+        dashboard_screen.reload_messages()
         dashboard_screen.resize(two_factor_screen.size())
         dashboard_screen.show()
 
@@ -88,6 +95,8 @@ def main():
 
     def show_dashboard_from_device():
         device_security_screen.close()
+        dashboard_screen.reload_sessions()
+        dashboard_screen.reload_messages()
         dashboard_screen.resize(device_security_screen.size())
         dashboard_screen.show()
 

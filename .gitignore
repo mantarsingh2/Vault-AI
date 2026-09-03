@@ -7,6 +7,9 @@ venv/
 # Environment variables
 .env
 
+# Local application data
+database/vault_ai.db
+
 # VS Code
 .vscode/
 

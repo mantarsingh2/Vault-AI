@@ -5,13 +5,15 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget
 
+from core.device import verify_device
+from ui.pages.login_screen import LoginScreen
+
 
 ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
-DEVICE_KEY_PATH = Path(__file__).resolve().parents[2] / ".vault_device_key"
 
 
 class DeviceVerificationScreen(QWidget):
-    """Existing-vault login verification rendered from the Figma export."""
+    """Existing-vault login verification with real cryptographic identity and hardware verification."""
 
     DESIGN_W = 1440
     DESIGN_H = 1024
@@ -40,8 +42,10 @@ class DeviceVerificationScreen(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if not self.ready and not self.check_timer.isActive():
-            self.check_timer.start(650)
+        self.completed_steps = 0
+        self.ready = False
+        if not self.check_timer.isActive():
+            self.check_timer.start(550)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -86,9 +90,9 @@ class DeviceVerificationScreen(QWidget):
         if self.completed_steps >= len(self.STATUS_POSITIONS):
             self.check_timer.stop()
             self.ready = True
-            # A device without a locally registered key requires the extra
-            # authentication step; a registered device can continue directly.
-            self.risk_high = not DEVICE_KEY_PATH.exists()
+            username = LoginScreen.get_default_username()
+            verification_result = verify_device(username)
+            self.risk_high = verification_result["risk_high"]
         self.update()
 
     def mousePressEvent(self, event):

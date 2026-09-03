@@ -1,17 +1,26 @@
 from pathlib import Path
-import hashlib
+import os
+import platform
+import socket
 
 from PySide6.QtCore import Qt, QTimer, QRectF, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget
 
+from core.auth import (
+    create_user,
+    get_lockout_status,
+    record_failed_attempt,
+    reset_failed_attempts,
+    verify_user,
+)
+from database import get_connection, initialize_database
 from ui.fonts import figma_font, load_application_fonts
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 ASSETS_DIR = BASE_DIR / "ui" / "assets"
-CREDENTIALS_PATH = BASE_DIR / ".vault_master_hash"
 
 
 class LoginScreen(QWidget):
@@ -200,12 +209,37 @@ class LoginScreen(QWidget):
         width = painter.fontMetrics().horizontalAdvance(text)
         painter.drawText(int(center_x - width / 2), baseline_y, text)
 
+    def check_lockout_status(self) -> float:
+        """Check if user is currently locked out. Returns remaining seconds (0.0 if not locked)."""
+        username = self.get_default_username()
+        attempts, remaining = get_lockout_status(username)
+        if remaining > 0:
+            minutes = int(remaining) // 60
+            seconds = int(remaining) % 60
+            self.error_message = (
+                f"Too many failed attempts. Vault locked for 10 minutes ({minutes}m {seconds:02d}s remaining)."
+            )
+            self.password = ""
+            self.password_focused = False
+            return remaining
+        else:
+            if self.error_message.startswith("Too many failed attempts"):
+                self.error_message = ""
+            return 0.0
+
+    def is_locked(self) -> bool:
+        return self.check_lockout_status() > 0
+
     def mousePressEvent(self, event):
         scale = min(self.width() / self.DESIGN_W, self.height() / self.DESIGN_H)
         x = (event.position().x() - (self.width() - self.DESIGN_W * scale) / 2) / scale
         y = (event.position().y() - (self.height() - self.DESIGN_H * scale) / 2) / scale
 
         if 414.5 <= x <= 1024.5 and 412.5 <= y <= 464.5:
+            if self.is_locked():
+                self.password_focused = False
+                self.update()
+                return
             self.password_focused = True
             self.setFocus()
             if x >= 978:
@@ -235,6 +269,10 @@ class LoginScreen(QWidget):
         super().mouseMoveEvent(event)
 
     def blink_cursor(self):
+        remaining = self.check_lockout_status()
+        if remaining > 0:
+            self.update()
+            return
         if self.password_focused:
             self.cursor_visible = not self.cursor_visible
             self.update()
@@ -246,6 +284,9 @@ class LoginScreen(QWidget):
         super().focusOutEvent(event)
 
     def keyPressEvent(self, event):
+        if self.is_locked():
+            return
+
         if not self.password_focused:
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self.unlock_vault()
@@ -294,25 +335,79 @@ class LoginScreen(QWidget):
                 return index
         return len(shown)
 
+    @classmethod
+    def get_default_username(cls) -> str:
+        return (
+            platform.node()
+            or socket.gethostname()
+            or os.environ.get("COMPUTERNAME")
+            or os.environ.get("HOSTNAME")
+            or "default_user"
+        )
+
     def unlock_vault(self):
-        stored_hash = ""
-        if CREDENTIALS_PATH.exists():
-            stored_hash = CREDENTIALS_PATH.read_text(encoding="utf-8").strip()
-        entered_hash = hashlib.sha256(self.password.encode("utf-8")).hexdigest()
+        if self.is_locked():
+            self.update()
+            return
 
         if not self.password:
             self.error_message = "Enter your master password."
-        elif not stored_hash:
+            self.update()
+            return
+
+        username = self.get_default_username()
+        initialize_database()
+        connection = get_connection()
+        try:
+            row = connection.execute(
+                "SELECT 1 FROM users WHERE username = ?", (username,)
+            ).fetchone()
+        finally:
+            connection.close()
+
+        if row is None:
             self.error_message = "No existing vault found. Create a new vault first."
-        elif entered_hash != stored_hash:
-            self.error_message = "Incorrect master password."
+        elif not verify_user(username, self.password):
+            attempts, remaining = record_failed_attempt(username)
+            if remaining > 0:
+                minutes = int(remaining) // 60
+                seconds = int(remaining) % 60
+                self.error_message = (
+                    f"Too many failed attempts. Vault locked for 10 minutes ({minutes}m {seconds:02d}s remaining)."
+                )
+                self.password = ""
+                self.password_cursor = 0
+                self.password_focused = False
+            else:
+                remaining_attempts = 5 - attempts
+                self.error_message = (
+                    f"Incorrect master password. ({remaining_attempts} attempt{'s' if remaining_attempts > 1 else ''} left)"
+                )
         else:
+            reset_failed_attempts(username)
             self.error_message = ""
             self.unlocked.emit()
 
         self.update()
 
-    @staticmethod
-    def store_master_password(password):
-        password_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
-        CREDENTIALS_PATH.write_text(password_hash, encoding="utf-8")
+    @classmethod
+    def store_master_password(cls, password: str, username: str | None = None) -> bool:
+        if username is None:
+            username = cls.get_default_username()
+        if not create_user(username, password):
+            from core.auth.service import _hash_password, _normalise_username, _validate_password
+            norm_user = _normalise_username(username)
+            _validate_password(password)
+            initialize_database()
+            connection = get_connection()
+            try:
+                connection.execute(
+                    "UPDATE users SET password_hash = ?, failed_attempts = 0, locked_until = 0 WHERE username = ?",
+                    (_hash_password(password), norm_user),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+        else:
+            reset_failed_attempts(username)
+        return True

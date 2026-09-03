@@ -1,5 +1,6 @@
-import base64
-import secrets
+import os
+import platform
+import socket
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QRectF, Signal
@@ -7,13 +8,15 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget
 
+from core.device import register_device
+from ui.pages.login_screen import LoginScreen
+
 
 ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
-DEVICE_KEY_PATH = Path(__file__).resolve().parents[2] / ".vault_device_key"
 
 
 class DeviceSecurityScreen(QWidget):
-    """Figma device-security progress screen with real local key generation."""
+    """Figma device-security progress screen with real cryptographic keypair & hardware registration."""
 
     DESIGN_W = 1440
     DESIGN_H = 1024
@@ -47,8 +50,11 @@ class DeviceSecurityScreen(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if not self.ready and not self.generation_timer.isActive():
-            self.generation_timer.start(650)
+        self.completed_steps = 0
+        self.ready = False
+        self.show_complete_popup = False
+        if not self.generation_timer.isActive():
+            self.generation_timer.start(550)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -66,23 +72,24 @@ class DeviceSecurityScreen(QWidget):
         painter.setPen(QPen(QColor("#2E8DE7"), 14, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawArc(QRectF(631, 318, 178, 178), -self.ring_angle * 16, 70 * 16)
 
-        # QSvgRenderer cannot resolve the raster patterns embedded in the
-        # exported Figma SVG, so restore them at their Figma coordinates.
+        # Draw header and button icons
         painter.drawPixmap(694, 83, 50, 60, self.header_key)
         painter.drawPixmap(771, 909, 20, 20, self.right_icon)
+
         for index, (x, y) in enumerate(self.STATUS_POSITIONS):
             if index < self.completed_steps:
                 painter.drawPixmap(x, y, 22, 22, self.complete_icon)
             else:
                 self.draw_pending_icon(painter, x, y)
+
         if self.show_complete_popup:
             self.draw_complete_popup(painter)
+
         painter.end()
 
     def draw_complete_popup(self, painter):
         popup_x, popup_y = 561.5, 425
         self.complete_popup_renderer.render(painter, QRectF(popup_x, popup_y, 317, 174))
-        # Restore the embedded Figma checkmark asset that Qt cannot resolve.
         painter.drawPixmap(int(popup_x + 138.5), int(popup_y + 29), 40, 40, self.complete_popup_icon)
 
     @staticmethod
@@ -101,7 +108,8 @@ class DeviceSecurityScreen(QWidget):
         self.completed_steps += 1
         if self.completed_steps >= len(self.STATUS_POSITIONS):
             self.generation_timer.stop()
-            self.create_local_device_key()
+            username = LoginScreen.get_default_username()
+            register_device(username)
             self.ready = True
             self.show_complete_popup = True
             self.complete_popup_timer.start(1800)
@@ -115,12 +123,6 @@ class DeviceSecurityScreen(QWidget):
         if not self.ready:
             self.ring_angle = (self.ring_angle + 5) % 360
             self.update()
-
-    @staticmethod
-    def create_local_device_key():
-        if not DEVICE_KEY_PATH.exists():
-            key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
-            DEVICE_KEY_PATH.write_text(key, encoding="utf-8")
 
     def mousePressEvent(self, event):
         x, y = self.design_position(event.position())
