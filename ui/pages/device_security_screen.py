@@ -1,9 +1,10 @@
 import os
 import platform
 import socket
+import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QRectF, Signal
+from PySide6.QtCore import Qt, QTimer, QRectF, Signal, QThread
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget
@@ -13,6 +14,26 @@ from ui.pages.login_screen import LoginScreen
 
 
 ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
+
+
+class DeviceRegistrationWorker(QThread):
+    """Worker thread that executes real cryptographic key generation and hardware registration."""
+
+    step_completed = Signal(int)
+    finished_registration = Signal(dict)
+
+    def __init__(self, username: str, parent=None):
+        super().__init__(parent)
+        self.username = username
+
+    def run(self):
+        def on_step(step_idx: int, step_name: str):
+            self.step_completed.emit(step_idx)
+            # Micro-pause to allow UI to render step completion smoothly
+            time.sleep(0.18)
+
+        result = register_device(self.username, progress_callback=on_step)
+        self.finished_registration.emit(result)
 
 
 class DeviceSecurityScreen(QWidget):
@@ -39,8 +60,8 @@ class DeviceSecurityScreen(QWidget):
         self.ready = False
         self.show_complete_popup = False
         self.ring_angle = 0
-        self.generation_timer = QTimer(self)
-        self.generation_timer.timeout.connect(self.complete_next_step)
+        self.worker = None
+
         self.ring_timer = QTimer(self)
         self.ring_timer.timeout.connect(self.advance_ring)
         self.ring_timer.start(35)
@@ -53,8 +74,27 @@ class DeviceSecurityScreen(QWidget):
         self.completed_steps = 0
         self.ready = False
         self.show_complete_popup = False
-        if not self.generation_timer.isActive():
-            self.generation_timer.start(550)
+        self.start_registration()
+
+    def start_registration(self):
+        username = LoginScreen.get_default_username()
+        if self.worker is not None and self.worker.isRunning():
+            return
+        self.worker = DeviceRegistrationWorker(username, self)
+        self.worker.step_completed.connect(self.on_step_completed)
+        self.worker.finished_registration.connect(self.on_registration_finished)
+        self.worker.start()
+
+    def on_step_completed(self, step_idx: int):
+        self.completed_steps = step_idx
+        self.update()
+
+    def on_registration_finished(self, result: dict):
+        self.completed_steps = len(self.STATUS_POSITIONS)
+        self.ready = True
+        self.show_complete_popup = True
+        self.complete_popup_timer.start(1800)
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -104,17 +144,6 @@ class DeviceSecurityScreen(QWidget):
         painter.drawPoint(x + 11, y + 17)
         painter.restore()
 
-    def complete_next_step(self):
-        self.completed_steps += 1
-        if self.completed_steps >= len(self.STATUS_POSITIONS):
-            self.generation_timer.stop()
-            username = LoginScreen.get_default_username()
-            register_device(username)
-            self.ready = True
-            self.show_complete_popup = True
-            self.complete_popup_timer.start(1800)
-        self.update()
-
     def advance_after_popup(self):
         self.show_complete_popup = False
         self.device_key_generated.emit()
@@ -142,3 +171,4 @@ class DeviceSecurityScreen(QWidget):
             (point.x() - (self.width() - self.DESIGN_W * scale) / 2) / scale,
             (point.y() - (self.height() - self.DESIGN_H * scale) / 2) / scale,
         )
+

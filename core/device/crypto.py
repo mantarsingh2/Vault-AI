@@ -13,6 +13,7 @@ from ctypes import wintypes
 import hashlib
 import os
 import platform
+import socket
 import sys
 from pathlib import Path
 from typing import Any
@@ -233,25 +234,46 @@ class DeviceKeyHandle:
 # ---------------------------------------------------------------------------
 # Key Storage Provider Initializer
 # ---------------------------------------------------------------------------
-def _open_storage_provider() -> tuple[wintypes.HANDLE | None, str, bool]:
-    """Open Windows TPM Key Storage Provider if available, else Software KSP."""
+def _open_storage_provider(
+    preferred_provider: str | None = None,
+) -> tuple[wintypes.HANDLE | None, str, bool]:
+    """Open Windows TPM Key Storage Provider if available, else Software KSP.
+
+    Args:
+        preferred_provider: Optional provider preference.
+            - 'tpm': Try TPM only.
+            - 'software_ksp': Force Software KSP (for fallback testing/usage).
+            - None: Try TPM first, then fallback to Software KSP.
+    """
     if _NCRYPT is None:
         return None, "memory_fallback", False
 
     h_prov = wintypes.HANDLE()
+
+    # If explicitly forcing Software KSP (e.g. for fallback simulation / environments without TPM)
+    if preferred_provider == "software_ksp":
+        res = _NCRYPT.NCryptOpenStorageProvider(
+            ctypes.byref(h_prov), MS_SOFTWARE_KEY_STORAGE_PROVIDER, 0
+        )
+        if res == ERROR_SUCCESS:
+            return h_prov, "software_ksp", False
+        return None, "memory_fallback", False
+
     # 1. Attempt TPM Platform Crypto Provider (Hardware-backed)
-    res = _NCRYPT.NCryptOpenStorageProvider(
-        ctypes.byref(h_prov), MS_PLATFORM_KEY_STORAGE_PROVIDER, 0
-    )
-    if res == ERROR_SUCCESS:
-        return h_prov, "tpm", True
+    if preferred_provider is None or preferred_provider == "tpm":
+        res = _NCRYPT.NCryptOpenStorageProvider(
+            ctypes.byref(h_prov), MS_PLATFORM_KEY_STORAGE_PROVIDER, 0
+        )
+        if res == ERROR_SUCCESS:
+            return h_prov, "tpm", True
 
     # 2. Fallback to Windows Software Key Storage Provider (OS DPAPI protected)
-    res = _NCRYPT.NCryptOpenStorageProvider(
-        ctypes.byref(h_prov), MS_SOFTWARE_KEY_STORAGE_PROVIDER, 0
-    )
-    if res == ERROR_SUCCESS:
-        return h_prov, "software_ksp", False
+    if preferred_provider is None:
+        res = _NCRYPT.NCryptOpenStorageProvider(
+            ctypes.byref(h_prov), MS_SOFTWARE_KEY_STORAGE_PROVIDER, 0
+        )
+        if res == ERROR_SUCCESS:
+            return h_prov, "software_ksp", False
 
     return None, "memory_fallback", False
 
@@ -261,6 +283,7 @@ def _open_storage_provider() -> tuple[wintypes.HANDLE | None, str, bool]:
 # ---------------------------------------------------------------------------
 def generate_device_keypair(
     key_name: str | Path | None = None,
+    preferred_provider: str | None = None,
 ) -> tuple[DeviceKeyHandle, ec.EllipticCurvePublicKey]:
     """Generate a high-security OS/TPM protected non-exportable ECDSA P-256 keypair.
 
@@ -268,7 +291,7 @@ def generate_device_keypair(
     Returns the key handle and the corresponding standard EllipticCurvePublicKey.
     """
     clean_name = _sanitize_key_name(key_name)
-    h_prov, provider_type, is_hw = _open_storage_provider()
+    h_prov, provider_type, is_hw = _open_storage_provider(preferred_provider)
 
     if h_prov is not None and _NCRYPT is not None:
         h_key = wintypes.HANDLE()
@@ -347,11 +370,8 @@ def generate_device_keypair(
     return handle, pub
 
 
-def load_device_private_key(
-    key_identifier: str | Path | None = None,
-) -> DeviceKeyHandle | None:
-    """Load an existing OS/TPM-protected private key handle by name or identifier."""
-    clean_name = _sanitize_key_name(key_identifier)
+def _try_load_cng_key(clean_name: str) -> DeviceKeyHandle | None:
+    """Helper to try loading a single CNG / NCrypt key name from TPM or Software KSP."""
     h_prov, provider_type, is_hw = _open_storage_provider()
 
     if h_prov is not None and _NCRYPT is not None:
@@ -399,6 +419,50 @@ def load_device_private_key(
             is_persisted=True,
             fallback_key=_MEMORY_KEY_STORE[clean_name],
         )
+
+    return None
+
+
+def load_device_private_key(
+    key_identifier: str | Path | None = None,
+) -> DeviceKeyHandle | None:
+    """Load an existing OS/TPM-protected private key handle by name or identifier."""
+    if key_identifier is not None:
+        clean_name = _sanitize_key_name(key_identifier)
+        return _try_load_cng_key(clean_name)
+
+    # When key_identifier is None, check primary default name, then registered database identifier, then machine key
+    candidates = [DEFAULT_DEVICE_KEY_NAME]
+
+    try:
+        from database import get_connection
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT key_identifier FROM devices WHERE key_identifier IS NOT NULL AND key_identifier != '' ORDER BY id DESC"
+        ).fetchall()
+        conn.close()
+        for r in rows:
+            kid = r["key_identifier"]
+            if kid:
+                s_name = _sanitize_key_name(kid)
+                if s_name not in candidates:
+                    candidates.append(s_name)
+    except Exception:
+        pass
+
+    try:
+        hostname = platform.node() or socket.gethostname() or os.environ.get("COMPUTERNAME", "")
+        if hostname:
+            host_key = _sanitize_key_name(f"VaultAI_Device_{hostname}")
+            if host_key not in candidates:
+                candidates.append(host_key)
+    except Exception:
+        pass
+
+    for clean_name in candidates:
+        handle = _try_load_cng_key(clean_name)
+        if handle is not None:
+            return handle
 
     return None
 
@@ -530,10 +594,16 @@ def get_key_storage_info(key_identifier: str | Path | None = None) -> dict[str, 
             "non_exportable": True,
         }
 
+    provider_name = handle.provider_name
+    if provider_name == "tpm":
+        provider_name = MS_PLATFORM_KEY_STORAGE_PROVIDER
+    elif provider_name == "software_ksp":
+        provider_name = MS_SOFTWARE_KEY_STORAGE_PROVIDER
+
     info = {
         "key_present": True,
         "key_name": handle.key_name,
-        "provider": handle.provider_name,
+        "provider": provider_name,
         "hardware_backed": handle.is_hardware_backed,
         "non_exportable": not handle.is_exportable,
     }

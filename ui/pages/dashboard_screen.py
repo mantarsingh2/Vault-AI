@@ -18,6 +18,7 @@ from core.device import get_hardware_identifiers, get_key_storage_info
 from database import (
     add_message,
     create_session,
+    delete_session,
     ensure_default_session,
     get_session_messages,
     get_sessions,
@@ -220,20 +221,21 @@ class DashboardScreen(QWidget):
         for display_idx, session in enumerate(self.sessions[:6]):
             y_pos = chat_y_start + display_idx * (card_height + card_gap)
             is_hovered = self.hovered_item == f"session_{session['id']}"
+            is_del_hovered = self.hovered_item == f"delete_{session['id']}"
             is_selected = session["id"] == self.current_session_id
 
             bg_color = (
                 QColor("#131E35")
                 if is_selected
                 else QColor("#0D1629")
-                if is_hovered
+                if (is_hovered or is_del_hovered)
                 else QColor("#09101F")
             )
             border_color = (
                 QColor("#2E8DE7")
                 if is_selected
                 else QColor("#223354")
-                if is_hovered
+                if (is_hovered or is_del_hovered)
                 else QColor("#152238")
             )
 
@@ -246,15 +248,29 @@ class DashboardScreen(QWidget):
             painter.setFont(figma_font("Roboto", 15, QFont.Weight.Medium))
             painter.setPen(Qt.white)
             title_text = session["title"]
-            if len(title_text) > 22:
-                title_text = title_text[:20] + ".."
+            if len(title_text) > 18:
+                title_text = title_text[:16] + ".."
             painter.drawText(84, y_pos + 38, title_text)
 
-            painter.setFont(figma_font("Roboto", 12, QFont.Weight.Normal))
-            painter.setPen(QColor("#8E9AAF"))
-            time_label = session.get("updated_at", "")[11:16] or "Active"
-            time_w = painter.fontMetrics().horizontalAdvance(time_label)
-            painter.drawText(362 - time_w, y_pos + 38, time_label)
+            # Delete button — only visible on hover
+            if is_hovered or is_del_hovered:
+                del_rect = QRectF(348, y_pos + 18, 26, 26)
+                del_bg = QColor("#5C1A1A") if is_del_hovered else QColor("#2A1515")
+                del_border = QColor("#FF4D4F") if is_del_hovered else QColor("#7A2020")
+                painter.setPen(QPen(del_border, 1.0))
+                painter.setBrush(del_bg)
+                painter.drawRoundedRect(del_rect, 5, 5)
+                # Draw a minimal trash icon (✕ cross for simplicity)
+                painter.setPen(QPen(QColor("#FF4D4F") if is_del_hovered else QColor("#C04040"), 1.8))
+                cx, cy = 361, y_pos + 31
+                painter.drawLine(int(cx - 4), int(cy - 4), int(cx + 4), int(cy + 4))
+                painter.drawLine(int(cx + 4), int(cy - 4), int(cx - 4), int(cy + 4))
+            else:
+                painter.setFont(figma_font("Roboto", 12, QFont.Weight.Normal))
+                painter.setPen(QColor("#8E9AAF"))
+                time_label = session.get("updated_at", "")[11:16] or "Active"
+                time_w = painter.fontMetrics().horizontalAdvance(time_label)
+                painter.drawText(362 - time_w, y_pos + 38, time_label)
 
         # Bottom Profile Row
         profile_hovered = self.hovered_item == "profile"
@@ -644,6 +660,23 @@ class DashboardScreen(QWidget):
         self.new_chat_clicked.emit()
         self.update()
 
+    def delete_chat_session(self, session_id: int):
+        """Delete a chat session and all its messages from the database."""
+        delete_session(session_id)
+        # If we deleted the active session, switch to another
+        if self.current_session_id == session_id:
+            self.reload_sessions()
+            if self.sessions:
+                self.current_session_id = self.sessions[0]["id"]
+            else:
+                self.current_session_id = create_session("New Chat")
+                self.reload_sessions()
+        else:
+            self.reload_sessions()
+        self.reload_messages()
+        self.hovered_item = None
+        self.update()
+
     def select_session(self, session_id: int):
         """Switch active session."""
         self.current_session_id = session_id
@@ -688,10 +721,14 @@ class DashboardScreen(QWidget):
             self.update()
             return
 
-        # Recent Chat Cards
+        # Recent Chat Cards — check delete button first, then card select
         for idx, session in enumerate(self.sessions[:6]):
             card_y = 340 + idx * (64 + 14)
             if 34 <= x <= 381 and card_y <= y <= card_y + 64:
+                # Delete button zone (right edge of card)
+                if 345 <= x <= 381 and card_y + 14 <= y <= card_y + 50:
+                    self.delete_chat_session(session["id"])
+                    return
                 self.select_session(session["id"])
                 return
 
@@ -781,7 +818,11 @@ class DashboardScreen(QWidget):
             for idx, session in enumerate(self.sessions[:6]):
                 card_y = 340 + idx * (64 + 14)
                 if 34 <= x <= 381 and card_y <= y <= card_y + 64:
-                    self.hovered_item = f"session_{session['id']}"
+                    # Check if hovering the delete button zone
+                    if 345 <= x <= 381 and card_y + 14 <= y <= card_y + 50:
+                        self.hovered_item = f"delete_{session['id']}"
+                    else:
+                        self.hovered_item = f"session_{session['id']}"
                     break
 
         if self.hovered_item != prev_hover:

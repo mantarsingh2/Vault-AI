@@ -7,10 +7,11 @@ import platform
 import secrets
 import socket
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from database import get_connection, initialize_database
 from core.device.crypto import (
+    DEFAULT_DEVICE_KEY_NAME,
     generate_device_keypair,
     load_device_private_key,
     load_public_key_from_pem,
@@ -33,6 +34,7 @@ def register_device(
     *,
     db_path: str | Path | None = None,
     key_path: str | Path | None = None,
+    progress_callback: Callable[[int, str], None] | None = None,
 ) -> dict[str, Any]:
     """Execute complete device security registration (Create Vault flow).
 
@@ -46,14 +48,20 @@ def register_device(
     device_name = platform.node() or socket.gethostname() or "UnknownDevice"
     hardware_fingerprint = get_hardware_fingerprint()
 
-    key_identifier = key_path if key_path is not None else f"VaultAI_Device_{username}"
+    key_identifier = key_path if key_path is not None else DEFAULT_DEVICE_KEY_NAME
 
     # Step 1: Generate cryptographic keypair directly in TPM/OS KSP
     private_key, public_key = generate_device_keypair(key_identifier)
     public_pem = public_key_to_pem(public_key)
+    key_provider = private_key.provider_name
+    if progress_callback:
+        progress_callback(1, "key_pair_generated")
 
     # Step 2: Ensure private key is safely stored and protected
     saved_key_handle = save_device_private_key(private_key, key_identifier)
+    is_protected = bool(saved_key_handle and saved_key_handle.exists())
+    if progress_callback:
+        progress_callback(2, "private_key_protected")
 
     # Step 3: Register device identity in SQLite database
     connection = get_connection(db_path)
@@ -68,18 +76,18 @@ def register_device(
             connection.execute(
                 """
                 UPDATE devices 
-                SET device_name = ?, public_key = ?, status = 'trusted', last_verified_at = CURRENT_TIMESTAMP 
+                SET device_name = ?, public_key = ?, key_identifier = ?, key_provider = ?, status = 'trusted', last_verified_at = CURRENT_TIMESTAMP 
                 WHERE id = ?
                 """,
-                (device_name, public_pem, existing["id"]),
+                (device_name, public_pem, key_identifier, key_provider, existing["id"]),
             )
         else:
             connection.execute(
                 """
-                INSERT INTO devices (username, device_name, hardware_fingerprint, public_key, status)
-                VALUES (?, ?, ?, ?, 'trusted')
+                INSERT INTO devices (username, device_name, hardware_fingerprint, public_key, key_identifier, key_provider, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'trusted')
                 """,
-                (username, device_name, hardware_fingerprint, public_pem),
+                (username, device_name, hardware_fingerprint, public_pem, key_identifier, key_provider),
             )
         connection.commit()
         db_registered = True
@@ -88,8 +96,13 @@ def register_device(
     finally:
         connection.close()
 
+    if progress_callback:
+        progress_callback(3, "device_identity_registered")
+
     # Step 4: Hardware checking
     hw_check = check_hardware_compatibility()
+    if progress_callback:
+        progress_callback(4, "hardware_compatible")
 
     is_protected = bool(saved_key_handle and saved_key_handle.exists())
 
@@ -98,6 +111,8 @@ def register_device(
         "device_name": device_name,
         "hardware_fingerprint": hardware_fingerprint,
         "public_key": public_pem,
+        "key_identifier": key_identifier,
+        "key_provider": key_provider,
         "steps": {
             "key_pair_generated": True,
             "private_key_protected": is_protected,
@@ -113,6 +128,7 @@ def verify_device(
     *,
     db_path: str | Path | None = None,
     key_path: str | Path | None = None,
+    progress_callback: Callable[[int, str], None] | None = None,
 ) -> dict[str, Any]:
     """Execute complete device verification (Login / Unlock Vault flow).
 
@@ -125,7 +141,7 @@ def verify_device(
     initialize_database(db_path)
     current_fingerprint = get_hardware_fingerprint()
 
-    # 1. Check DB registration
+    # Query DB device row
     connection = get_connection(db_path)
     device_row = None
     try:
@@ -133,19 +149,17 @@ def verify_device(
             "SELECT * FROM devices WHERE username = ? AND hardware_fingerprint = ?",
             (username, current_fingerprint),
         ).fetchone()
-        if device_row:
-            connection.execute(
-                "UPDATE devices SET last_verified_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (device_row["id"],),
-            )
-            connection.commit()
     finally:
         connection.close()
 
-    registered_device = device_row is not None and device_row["status"] == "trusted"
+    # 1. Cryptographic signature verification using OS/TPM key
+    if key_path is not None:
+        key_identifier = key_path
+    elif device_row is not None and "key_identifier" in device_row.keys() and device_row["key_identifier"]:
+        key_identifier = device_row["key_identifier"]
+    else:
+        key_identifier = DEFAULT_DEVICE_KEY_NAME
 
-    # 2. Cryptographic signature verification using OS/TPM key
-    key_identifier = key_path if key_path is not None else f"VaultAI_Device_{username}"
     private_key = load_device_private_key(key_identifier)
     crypto_valid = False
 
@@ -158,11 +172,34 @@ def verify_device(
         except Exception:
             crypto_valid = False
 
+    if progress_callback:
+        progress_callback(1, "cryptographic_identity")
+
+    # 2. Check DB registration
+    registered_device = device_row is not None and device_row["status"] == "trusted"
+    if registered_device:
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "UPDATE devices SET last_verified_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (device_row["id"],),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    if progress_callback:
+        progress_callback(2, "registered_device")
+
     # 3. Security environment check
     sec_env = check_security_environment()
+    if progress_callback:
+        progress_callback(3, "security_environment")
 
     # 4. Network environment check
     net_env = check_network_environment()
+    if progress_callback:
+        progress_callback(4, "network_environment")
 
     is_trusted = bool(registered_device and crypto_valid and sec_env["secure"])
     risk_high = not is_trusted

@@ -1,6 +1,7 @@
+import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QRectF, Signal
+from PySide6.QtCore import Qt, QTimer, QRectF, Signal, QThread
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QWidget
@@ -10,6 +11,26 @@ from ui.pages.login_screen import LoginScreen
 
 
 ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
+
+
+class DeviceVerificationWorker(QThread):
+    """Worker thread that executes real cryptographic challenge signing & hardware verification."""
+
+    step_completed = Signal(int)
+    finished_verification = Signal(dict)
+
+    def __init__(self, username: str, parent=None):
+        super().__init__(parent)
+        self.username = username
+
+    def run(self):
+        def on_step(step_idx: int, step_name: str):
+            self.step_completed.emit(step_idx)
+            # Micro-pause to allow UI to render step completion smoothly
+            time.sleep(0.18)
+
+        result = verify_device(self.username, progress_callback=on_step)
+        self.finished_verification.emit(result)
 
 
 class DeviceVerificationScreen(QWidget):
@@ -34,8 +55,8 @@ class DeviceVerificationScreen(QWidget):
         self.ready = False
         self.risk_high = False
         self.ring_angle = 0
-        self.check_timer = QTimer(self)
-        self.check_timer.timeout.connect(self.complete_next_step)
+        self.worker = None
+
         self.ring_timer = QTimer(self)
         self.ring_timer.timeout.connect(self.advance_ring)
         self.ring_timer.start(35)
@@ -44,8 +65,27 @@ class DeviceVerificationScreen(QWidget):
         super().showEvent(event)
         self.completed_steps = 0
         self.ready = False
-        if not self.check_timer.isActive():
-            self.check_timer.start(550)
+        self.risk_high = False
+        self.start_verification()
+
+    def start_verification(self):
+        username = LoginScreen.get_default_username()
+        if self.worker is not None and self.worker.isRunning():
+            return
+        self.worker = DeviceVerificationWorker(username, self)
+        self.worker.step_completed.connect(self.on_step_completed)
+        self.worker.finished_verification.connect(self.on_verification_finished)
+        self.worker.start()
+
+    def on_step_completed(self, step_idx: int):
+        self.completed_steps = step_idx
+        self.update()
+
+    def on_verification_finished(self, result: dict):
+        self.completed_steps = len(self.STATUS_POSITIONS)
+        self.ready = True
+        self.risk_high = result.get("risk_high", False)
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -85,16 +125,6 @@ class DeviceVerificationScreen(QWidget):
             self.ring_angle = (self.ring_angle + 5) % 360
             self.update()
 
-    def complete_next_step(self):
-        self.completed_steps += 1
-        if self.completed_steps >= len(self.STATUS_POSITIONS):
-            self.check_timer.stop()
-            self.ready = True
-            username = LoginScreen.get_default_username()
-            verification_result = verify_device(username)
-            self.risk_high = verification_result["risk_high"]
-        self.update()
-
     def mousePressEvent(self, event):
         x, y = self.design_position(event.position())
         if self.ready and 455 <= x <= 985 and 859 <= y <= 925:
@@ -113,3 +143,4 @@ class DeviceVerificationScreen(QWidget):
             (point.x() - (self.width() - self.DESIGN_W * scale) / 2) / scale,
             (point.y() - (self.height() - self.DESIGN_H * scale) / 2) / scale,
         )
+

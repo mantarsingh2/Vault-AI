@@ -52,6 +52,8 @@ def initialize_database(db_path: str | Path | None = None) -> None:
                 device_name TEXT NOT NULL,
                 hardware_fingerprint TEXT NOT NULL,
                 public_key TEXT NOT NULL,
+                key_identifier TEXT NOT NULL DEFAULT '',
+                key_provider TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'trusted',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_verified_at TEXT,
@@ -59,6 +61,11 @@ def initialize_database(db_path: str | Path | None = None) -> None:
             )
             """
         )
+        dev_columns = [row["name"] for row in connection.execute("PRAGMA table_info(devices)").fetchall()]
+        if "key_identifier" not in dev_columns:
+            connection.execute("ALTER TABLE devices ADD COLUMN key_identifier TEXT NOT NULL DEFAULT ''")
+        if "key_provider" not in dev_columns:
+            connection.execute("ALTER TABLE devices ADD COLUMN key_provider TEXT NOT NULL DEFAULT ''")
 
         connection.execute(
             """
