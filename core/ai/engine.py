@@ -1,41 +1,154 @@
-"""Main AI Engine and Agent execution loop for Vault AI."""
+"""Local AI reasoning engine and execution pipeline for Vault AI."""
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+import os
 
+from core.ai.agent import VaultAIAgent
+from core.ai.ollama_client import OllamaClient
 from core.ai.router import Intent, classify_intent
-from core.ai.local_model import LocalModelError, local_model
 from core.device import get_hardware_identifiers, get_key_storage_info
-from core.files import format_directory_listing
-from core.system import format_system_summary, get_system_metrics
+from core.file_manager.analyzer import FileAnalyzer
+from core.file_manager.scanner import FileScanner
+from core.file_manager.executor import execute_organization_plan
+from core.system.monitor import format_system_summary
 
+# Global in-memory state for pending file operations
+PENDING_ACTIONS: Dict[str, List[Dict[str, Any]]] = {}
 
 def is_ollama_available() -> bool:
-    """Check if local Ollama inference server is online."""
-    return local_model.is_available()
+    """Check if local Ollama service is reachable and running."""
+    client = OllamaClient()
+    return client.check_connection(timeout=2.0)
 
 
-def query_ollama(prompt: str, system_prompt: str = "") -> str | None:
-    """Compatibility wrapper that queries the configured local chat model."""
-    try:
-        messages = ([{"role": "system", "content": system_prompt}] if system_prompt else [])
-        messages.append({"role": "user", "content": prompt})
-        return local_model.chat(messages)
-    except LocalModelError:
-        return None
+def query_ollama(prompt: str, system_prompt: str = "") -> Optional[str]:
+    """Query local Ollama with qwen3:8b using direct output mode (think=False)."""
+    client = OllamaClient()
+    if not system_prompt:
+        system_prompt = (
+            "You are Vault AI, a helpful and concise assistant. "
+            "Answer questions directly and accurately in 1-3 sentences. "
+            "Do not repeat the question. Do not add unnecessary padding or disclaimers."
+        )
+    res = client.generate(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        think=False,
+        options={"num_predict": 100, "temperature": 0.2},
+        timeout=120,
+    )
+    if res.get("success") and res.get("response"):
+        return res["response"].strip()
+    return None
 
 
-def execute_agent_pipeline(
-    user_query: str, conversation_history: list[dict[str, str]] | None = None
-) -> dict[str, Any]:
-    """Execute the full agent loop (Understand -> Plan -> Check -> Execute -> Verify -> Respond)."""
+def execute_agent_pipeline(user_query: str, session_id: str = "default") -> Dict[str, Any]:
+    """Execute the full agent loop (Understand -> Scan/Analyze -> Reason with Qwen3:8b -> Respond)."""
     intent = classify_intent(user_query)
-    
+
     # -------------------------------------------------------------
-    # 1. System Monitoring Intent
+    # 0. Confirm Pending Action Intent (File Movement)
     # -------------------------------------------------------------
-    if intent == Intent.SYSTEM_STATUS:
+    if intent == Intent.CONFIRM_ACTION:
+        pending = PENDING_ACTIONS.get(session_id)
+        if pending:
+            # Execute the pending file move action
+            exec_result = execute_organization_plan(pending)
+            
+            # Clear state after execution
+            del PENDING_ACTIONS[session_id]
+            
+            return {
+                "role": "assistant",
+                "content": exec_result["summary"],
+                "intent": intent.value,
+                "status": "success",
+                "steps": ["User Confirmed Execution", f"Moved {exec_result['success_count']} Files"],
+            }
+        else:
+            return {
+                "role": "assistant",
+                "content": "There are no pending actions to execute right now. What else can I help you with?",
+                "intent": intent.value,
+                "status": "success",
+                "steps": ["No Pending Action Found"],
+            }
+
+    # -------------------------------------------------------------
+    # 1. File Operations Intent (All File Management queries)
+    # -------------------------------------------------------------
+    if intent == Intent.FILE_OPERATION:
+        agent = VaultAIAgent()
+        result = agent.process_prompt(user_query)
+
+        ai_text = result.get("ai_response", "")
+        dup_summary = result.get("duplicate_summary", "")
+        duplicates = result.get("duplicates", [])
+        suggestions = result.get("suggestions", [])
+        matched_files = result.get("matched_files", [])
+        total_files = result.get("total_files", 0)
+
+        # Format markdown response
+        md_sections = []
+
+        if ai_text:
+            md_sections.append(ai_text)
+
+        # If duplicate files were detected AND user asked about duplicates
+        user_asked_duplicates = any(w in user_query.lower() for w in ["duplicate", "duplicates", "wasted", "copies", "copy"])
+        if duplicates and user_asked_duplicates:
+            md_sections.append("### 🔁 **Duplicate Files Breakdown:**\n")
+            for idx, d in enumerate(duplicates[:5], 1):
+                files_list = "\n".join([f"  - `{f}`" for f in d.get("files", [])])
+                md_sections.append(
+                    f"**Group {idx}** (Size: {d.get('human_size')}, Saves: {d.get('potential_savings')}):\n{files_list}"
+                )
+
+        # If organization suggestions were made AND user asked for organization
+        user_asked_organize = any(w in user_query.lower() for w in ["organize", "sort", "categorize", "cleanup", "clean up", "suggest"])
+        if suggestions and user_asked_organize:
+            md_sections.append("### 💡 **Suggested Organization Plan:**\n")
+            md_sections.append("| Original File | Suggested Destination | Category | Reason |")
+            md_sections.append("| :--- | :--- | :--- | :--- |")
+            for s in suggestions[:8]:
+                orig = Path(s.get("original_path", "")).name
+                dest = s.get("suggested_destination", "")
+                cat = s.get("category", "")
+                reason = s.get("reason", "")
+                md_sections.append(f"| `{orig}` | `{dest}` | **{cat}** | {reason} |")
+                
+            # Ask for permission and save state
+            PENDING_ACTIONS[session_id] = suggestions
+            md_sections.append("\n> ⚡ **Awaiting Permission:** Do you want me to go ahead and move these files for you? (Reply 'yes' or 'do it')")
+
+        # If specific matched search files were found
+        elif matched_files:
+            md_sections.append(f"\n### 📄 **Discovered Files ({len(matched_files)} items):**\n")
+            md_sections.append("| File Name | Category | Size | Path |")
+            md_sections.append("| :--- | :--- | :--- | :--- |")
+            for f in matched_files[:10]:
+                name = f.get("name", "")
+                cat = f.get("category", "")
+                size = f.get("human_size", "")
+                path = f.get("path", "")
+                md_sections.append(f"| `{name}` | **{cat}** | {size} | `{path}` |")
+
+        final_content = "\n\n".join(md_sections)
+        return {
+            "role": "assistant",
+            "content": final_content,
+            "intent": intent.value,
+            "status": "success",
+            "steps": ["Scanned Authorized Folders", "Detected Duplicates & Clusters", "Reasoned with Qwen3:8b"],
+        }
+
+    # -------------------------------------------------------------
+    # 2. System Monitoring Intent
+    # -------------------------------------------------------------
+    elif intent == Intent.SYSTEM_STATUS:
         summary_md = format_system_summary()
         response_text = (
             f"{summary_md}\n\n"
@@ -50,30 +163,13 @@ def execute_agent_pipeline(
         }
 
     # -------------------------------------------------------------
-    # 2. File Operations Intent
-    # -------------------------------------------------------------
-    elif intent == Intent.FILE_OPERATION:
-        listing_md = format_directory_listing()
-        response_text = (
-            f"{listing_md}\n\n"
-            f"> 🛡️ **Vault Guardian Verification:** Directory scan completed. No risky filesystem modifications performed."
-        )
-        return {
-            "role": "assistant",
-            "content": response_text,
-            "intent": intent.value,
-            "status": "success",
-            "steps": ["Target Path Inspected", "Files Enumerated", "Verified File Permissions"],
-        }
-
-    # -------------------------------------------------------------
     # 3. Security & Device Identity Intent
     # -------------------------------------------------------------
     elif intent == Intent.SECURITY_CHECK:
         sec_info = get_key_storage_info()
         hw_ids = get_hardware_identifiers()
         provider_label = "TPM 2.0 Security Processor (Hardware-backed)" if sec_info.get("hardware_backed") else "Windows CNG / Software KSP (OS-Protected)"
-        
+
         response_text = (
             f"### 🛡️ **Vault AI Device Cryptographic Identity**\n\n"
             f"| Security Property | Status | Details |\n"
@@ -96,11 +192,9 @@ def execute_agent_pipeline(
     # 4. Complex Multi-Step Task Planning Intent
     # -------------------------------------------------------------
     elif intent == Intent.COMPLEX_TASK:
-        # Check if Ollama is available to expand the plan
-        ollama_response = _query_local_model(
-            user_query, conversation_history,
-            instruction="Create a step-by-step plan for this desktop assistant request. Do not claim to execute it.",
-        )
+        ollama_response = query_ollama(
+            f"Create a step-by-step execution plan for the desktop agent request: '{user_query}'"
+        ) if is_ollama_available() else None
 
         if ollama_response:
             plan_content = ollama_response
@@ -134,72 +228,50 @@ def execute_agent_pipeline(
         if "who are you" in lower or "what can you do" in lower or "help" in lower:
             response_text = (
                 f"### 🤖 **Hello! I'm Vault AI**\n\n"
-                f"I am your local-first, resource-aware desktop AI agent. Here is what I can help you with right now:\n\n"
-                f"* 🖥️ **System & Hardware Monitoring** — Try asking: `Show CPU and RAM usage` or `Check system health`\n"
-                f"* 📁 **File & Directory Operations** — Try asking: `List files in this project`\n"
-                f"* 🛡️ **Device Security & TPM Identity** — Try asking: `Check TPM security status`\n"
-                f"* 📋 **Task Planning & Execution** — Try asking: `Setup Python environment plan`\n\n"
-                f"How can I assist you today?"
+                f"I am your local-first, privacy-respecting AI Desktop Guardian. Here is what I can do for you:\n\n"
+                f"* 📁 **Intelligent File Management** — Ask: `Which files belong to my project?`, `Find duplicate files`, or `Organize my documents`\n"
+                f"* 🖥️ **System & Hardware Monitoring** — Ask: `Show CPU and RAM usage`\n"
+                f"* 🛡️ **Device Security & TPM Identity** — Ask: `Check TPM security status`\n"
+                f"* 📋 **Task Planning** — Ask: `Plan setup for Python project`\n\n"
+                f"How can I help you today?"
             )
         else:
-            response_text = f"Hello! I am Vault AI. How can I assist you with your system or tasks today?"
+            response_text = f"Hello! I am Vault AI. How can I assist you with your files or system today?"
 
         return {
             "role": "assistant",
             "content": response_text,
             "intent": intent.value,
             "status": "success",
-            "steps": ["Understood Greeting", "Quick Local Path Response"],
+            "steps": ["Understood Greeting", "Quick Local Response"],
         }
 
     # -------------------------------------------------------------
-    # 6. General Reasoning & Knowledge Queries
+    # 6. General Reasoning & Knowledge Queries (Routed to Qwen3:8b)
     # -------------------------------------------------------------
     else:
-        llm_text = _query_local_model(user_query, conversation_history)
-        if llm_text:
-            return {
-                "role": "assistant",
-                "content": llm_text,
-                "intent": intent.value,
-                "status": "success",
-                "steps": ["Routed to Local Qwen3 4B", "Inference Completed"],
-            }
+        if is_ollama_available():
+            llm_text = query_ollama(user_query)
+            if llm_text:
+                return {
+                    "role": "assistant",
+                    "content": llm_text,
+                    "intent": intent.value,
+                    "status": "success",
+                    "steps": ["Routed to Local Qwen3:8b", "Inference Completed"],
+                }
 
-        # Offline / Local fallback reasoning
+        # Safe fallback if Ollama is unreachable
         response_text = (
             f"I have received your request: **'{user_query}'**.\n\n"
             f"* **Intent:** `{intent.value}`\n"
-            f"* **Local Execution Engine:** Active & Ready\n"
-            f"* **Resource Status:** Optimal\n\n"
-            f"I can inspect your hardware, manage local files, verify TPM security identity, or plan multi-step workflows. "
-            f"Try asking `Show system stats` or `List project files`!"
+            f"* **Local Execution Engine:** Active & Ready\n\n"
+            f"You can ask me to find duplicate files, organize documents, check CPU/RAM usage, or inspect device security!"
         )
         return {
             "role": "assistant",
             "content": response_text,
             "intent": intent.value,
             "status": "success",
-            "steps": ["Analyzed Query", "Local Rules Checked", "Generated Safe Response"],
+            "steps": ["Analyzed Query", "Generated Safe Response"],
         }
-
-
-def _query_local_model(
-    user_query: str,
-    conversation_history: list[dict[str, str]] | None = None,
-    instruction: str | None = None,
-) -> str | None:
-    """Ask Ollama using caller-owned conversation history."""
-    messages = [
-        {"role": message["role"], "content": message["content"]}
-        for message in (conversation_history or [])
-        if message.get("role") in {"user", "assistant"} and message.get("content")
-    ]
-    if instruction:
-        messages.append({"role": "user", "content": f"{instruction}\n\nRequest: {user_query}"})
-    else:
-        messages.append({"role": "user", "content": user_query})
-    try:
-        return local_model.chat(messages)
-    except LocalModelError:
-        return None

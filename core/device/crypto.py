@@ -306,9 +306,6 @@ def generate_device_keypair(
         )
         if res != ERROR_SUCCESS:
             _NCRYPT.NCryptFreeObject(h_prov)
-            if provider_type == "tpm":
-                # Retry with Software KSP provider
-                return generate_device_keypair(key_name, preferred_provider="software_ksp")
             raise RuntimeError(f"NCryptCreatePersistedKey failed for '{clean_name}': {res:#x}")
 
         # Finalize the key (stores it in TPM / OS KSP without export rights)

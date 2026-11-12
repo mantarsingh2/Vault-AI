@@ -9,11 +9,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget, QLineEdit
 
-from core.ai import ConversationManager, execute_agent_pipeline
+from core.ai import execute_agent_pipeline
 from core.device import get_hardware_identifiers, get_key_storage_info
 from database import (
     add_message,
@@ -31,6 +31,23 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 ASSETS_DIR = BASE_DIR / "ui" / "assets"
 
 
+class PipelineWorker(QThread):
+    finished_signal = Signal(dict)
+    error_signal = Signal(str)
+
+    def __init__(self, query: str, session_id: str, parent=None):
+        super().__init__(parent)
+        self.query = query
+        self.session_id = session_id
+
+    def run(self):
+        try:
+            result = execute_agent_pipeline(self.query, session_id=self.session_id)
+            self.finished_signal.emit(result)
+        except Exception as e:
+            self.error_signal.emit(str(e))
+
+
 class DashboardScreen(QWidget):
     """Interactive, database-connected Vault AI Dashboard screen."""
 
@@ -46,9 +63,6 @@ class DashboardScreen(QWidget):
     def __init__(self):
         super().__init__()
         load_application_fonts()
-
-        # Conversation manager — persistent memory + bounded history for Qwen3 4B.
-        self.conversation_manager = ConversationManager()
 
         self.setWindowTitle("Vault AI")
         self.setStyleSheet("background-color: #050B15;")
@@ -73,7 +87,7 @@ class DashboardScreen(QWidget):
         self.search_cursor = 0
         self.composer_text = ""
         self.composer_cursor = 0
-        self.active_field: str | None = None  # "search" or "composer"
+        self.active_field: str | None = "composer"  # default to composer
         self.hovered_item: str | None = None
         self.selected_chat_index = 0
         self.is_thinking = False
@@ -95,9 +109,31 @@ class DashboardScreen(QWidget):
         self.reload_sessions()
         self.reload_messages()
 
+        # Native QLineEdit for robust text input
+        self.input_box = QLineEdit(self)
+        self.input_box.setStyleSheet("background: transparent; color: white; border: none; font-family: Roboto; font-size: 15px;")
+        self.input_box.setPlaceholderText("Ask Vault AI anything or give a task...")
+        self.input_box.returnPressed.connect(self.send_composer_message)
+        self.input_box.show()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.active_field = "composer"
+        QTimer.singleShot(100, self.force_focus)
+
+    def force_focus(self):
+        self.activateWindow()
+        self.raise_()
+        self.setFocus()
+
     def _on_anim_tick(self):
         self.anim_tick = (self.anim_tick + 1) % 360
         if self.is_thinking or len(self.messages) == 0:
+            self.update()
+
+    def blink_cursor(self):
+        if self.active_field:
+            self.cursor_visible = not self.cursor_visible
             self.update()
 
     def reload_sessions(self):
@@ -132,6 +168,22 @@ class DashboardScreen(QWidget):
     # -------------------------------------------------------------
     # Painting & Rendering
     # -------------------------------------------------------------
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        scale = min(self.width() / self.DESIGN_W, self.height() / self.DESIGN_H)
+        canvas_x = (self.width() - self.DESIGN_W * scale) / 2
+        canvas_y = (self.height() - self.DESIGN_H * scale) / 2
+        
+        self.input_box.setGeometry(
+            int(canvas_x + 465 * scale),
+            int(canvas_y + 800 * scale),
+            int(900 * scale),
+            int(40 * scale)
+        )
+        font = self.input_box.font()
+        font.setPixelSize(int(15 * scale))
+        self.input_box.setFont(font)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHints(
@@ -502,20 +554,8 @@ class DashboardScreen(QWidget):
         painter.setBrush(QColor("#060B16"))
         painter.drawRoundedRect(composer_rect, 12, 12)
 
-        # Text input inside composer
-        painter.setFont(figma_font("Roboto", 15, QFont.Weight.Normal))
-        if self.composer_text:
-            painter.setPen(QColor("#FFFFFF"))
-            painter.drawText(465, 820, self.composer_text)
-        elif not composer_focused:
-            painter.setPen(QColor("#64748B"))
-            painter.drawText(465, 820, "Ask Vault AI anything or give a task (e.g. 'Show CPU & RAM', 'List files')...")
-
-        if composer_focused and self.cursor_visible:
-            cursor_x = 465 + painter.fontMetrics().horizontalAdvance(self.composer_text[:self.composer_cursor])
-            painter.setPen(QPen(QColor("#F8F6F9"), 1.5))
-            painter.drawLine(cursor_x, 804, cursor_x, 826)
-
+        # Text input is now handled by self.input_box QLineEdit
+        
         # Left Attachment / Action Icons
         clip_hovered = self.hovered_item == "clip"
         mic_hovered = self.hovered_item == "mic"
@@ -600,15 +640,17 @@ class DashboardScreen(QWidget):
         width = painter.fontMetrics().horizontalAdvance(text)
         painter.drawText(int(center_x - width / 2), int(baseline_y), text)
 
+
     # -------------------------------------------------------------
     # User Input & Message Handling
     # -------------------------------------------------------------
     def send_composer_message(self):
-        text = self.composer_text.strip()
+        text = self.input_box.text().strip()
         if not text or self.is_thinking:
             return
 
         # Clear composer input
+        self.input_box.clear()
         self.composer_text = ""
         self.composer_cursor = 0
 
@@ -618,45 +660,44 @@ class DashboardScreen(QWidget):
             update_session_title(self.current_session_id, title_candidate)
             self.reload_sessions()
 
-        # 1. Save user message to SQLite first so it is included in the bounded slice.
+        # 1. Save user message to database
         add_message(self.current_session_id, role="user", content=text)
         self.reload_messages()
         self.message_sent.emit(text)
 
-        # Retrieve a bounded history slice (last N messages) to pass to Qwen3 4B.
-        # This prevents unbounded context growth on CPU-only hardware.
-        conversation_history = self.conversation_manager.get_bounded_history(
-            self.current_session_id
-        )
-
-        # 2. Set thinking state and trigger agent pipeline
+        # 2. Set thinking state and trigger agent pipeline asynchronously in background
         self.is_thinking = True
         self.update()
 
-        # Execute agent pipeline asynchronously via timer
-        QTimer.singleShot(150, lambda: self._process_agent_response(text, conversation_history))
+        self.pipeline_worker = PipelineWorker(text, str(self.current_session_id), self)
+        self.pipeline_worker.finished_signal.connect(self._on_agent_finished)
+        self.pipeline_worker.error_signal.connect(self._on_agent_error)
+        self.pipeline_worker.start()
 
-    def _process_agent_response(self, query: str, conversation_history=None):
-        try:
-            agent_result = execute_agent_pipeline(query, conversation_history=conversation_history)
-            add_message(
-                self.current_session_id,
-                role=agent_result.get("role", "assistant"),
-                content=agent_result.get("content", ""),
-                intent=agent_result.get("intent", "general"),
-                status=agent_result.get("status", "success"),
-            )
-        except Exception as e:
-            add_message(
-                self.current_session_id,
-                role="assistant",
-                content=f"⚠️ **Error executing agent pipeline:** {e}",
-                status="error",
-            )
-        finally:
-            self.is_thinking = False
-            self.reload_messages()
-            self.reload_sessions()
+    def _on_agent_finished(self, agent_result: dict):
+        add_message(
+            self.current_session_id,
+            role=agent_result.get("role", "assistant"),
+            content=agent_result.get("content", ""),
+            intent=agent_result.get("intent", "general"),
+            status=agent_result.get("status", "success"),
+        )
+        self.is_thinking = False
+        self.reload_messages()
+        self.reload_sessions()
+        self.update()
+
+    def _on_agent_error(self, error_msg: str):
+        add_message(
+            self.current_session_id,
+            role="assistant",
+            content=f"⚠️ **Error executing agent pipeline:** {error_msg}",
+            status="error",
+        )
+        self.is_thinking = False
+        self.reload_messages()
+        self.reload_sessions()
+        self.update()
 
     def start_new_chat(self):
         """Create a fresh chat session."""
@@ -786,7 +827,10 @@ class DashboardScreen(QWidget):
             self.update()
             return
 
-        self.active_field = None
+        # If clicked outside, default to composer so user can always type
+        if not self.active_field:
+            self.active_field = "composer"
+            
         self.update()
         super().mousePressEvent(event)
 
@@ -881,31 +925,7 @@ class DashboardScreen(QWidget):
             else:
                 return super().keyPressEvent(event)
 
-        elif self.active_field == "composer":
-            if key == Qt.Key.Key_Left:
-                self.composer_cursor = max(0, self.composer_cursor - 1)
-            elif key == Qt.Key.Key_Right:
-                self.composer_cursor = min(len(self.composer_text), self.composer_cursor + 1)
-            elif key == Qt.Key.Key_Home:
-                self.composer_cursor = 0
-            elif key == Qt.Key.Key_End:
-                self.composer_cursor = len(self.composer_text)
-            elif key == Qt.Key.Key_Backspace:
-                if self.composer_cursor > 0:
-                    self.composer_text = self.composer_text[: self.composer_cursor - 1] + self.composer_text[self.composer_cursor :]
-                    self.composer_cursor -= 1
-            elif key == Qt.Key.Key_Delete:
-                if self.composer_cursor < len(self.composer_text):
-                    self.composer_text = self.composer_text[: self.composer_cursor] + self.composer_text[self.composer_cursor + 1 :]
-            elif key == Qt.Key.Key_A and modifiers & Qt.KeyboardModifier.ControlModifier:
-                self.composer_text = ""
-                self.composer_cursor = 0
-            elif event.text() and event.text().isprintable():
-                t = event.text()
-                self.composer_text = self.composer_text[: self.composer_cursor] + t + self.composer_text[self.composer_cursor :]
-                self.composer_cursor += len(t)
-            else:
-                return super().keyPressEvent(event)
+
 
         self.cursor_visible = True
         self.update()
@@ -916,7 +936,6 @@ class DashboardScreen(QWidget):
             self.update()
 
     def focusOutEvent(self, event):
-        self.active_field = None
         self.cursor_visible = True
         self.update()
         super().focusOutEvent(event)
