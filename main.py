@@ -10,7 +10,6 @@ from ui.pages.device_verification_screen import DeviceVerificationScreen
 from ui.pages.login_risk_screen import LoginRiskScreen
 from ui.pages.login_screen import LoginScreen
 from ui.pages.splash_screen import SplashScreen
-from ui.pages.two_factor_screen import TwoFactorScreen
 
 
 def main():
@@ -22,7 +21,6 @@ def main():
     create_vault_screen = CreateVaultScreen()
     device_security_screen = DeviceSecurityScreen()
     device_verification_screen = DeviceVerificationScreen()
-    two_factor_screen = TwoFactorScreen()
     login_risk_screen = LoginRiskScreen()
     dashboard_screen = DashboardScreen()
 
@@ -53,29 +51,16 @@ def main():
         login_risk_screen.resize(device_verification_screen.size())
         login_risk_screen.show()
 
-    def show_two_factor_from_risk(risk_high):
-        if risk_high:
-            login_risk_screen.close()
-            two_factor_screen.resize(device_verification_screen.size())
-            two_factor_screen.show()
-        else:
-            login_risk_screen.close()
-            dashboard_screen.reload_sessions()
-            dashboard_screen.reload_messages()
-            dashboard_screen.resize(login_risk_screen.size())
-            dashboard_screen.show()
-
-    device_verification_screen.risk_assessed.connect(show_login_risk)
-    login_risk_screen.risk_complete.connect(show_two_factor_from_risk)
-
-    def show_dashboard_from_two_factor():
-        two_factor_screen.close()
+    def show_dashboard_from_risk(_risk_high=False):
+        # 2FA temporarily removed — always proceed directly to dashboard.
+        login_risk_screen.close()
         dashboard_screen.reload_sessions()
         dashboard_screen.reload_messages()
-        dashboard_screen.resize(two_factor_screen.size())
+        dashboard_screen.resize(login_risk_screen.size())
         dashboard_screen.show()
 
-    two_factor_screen.verified.connect(show_dashboard_from_two_factor)
+    device_verification_screen.risk_assessed.connect(show_login_risk)
+    login_risk_screen.risk_complete.connect(show_dashboard_from_risk)
 
     def show_login_from_dashboard():
         dashboard_screen.close()

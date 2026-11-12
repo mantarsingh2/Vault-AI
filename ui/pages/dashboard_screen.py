@@ -13,7 +13,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
-from core.ai import execute_agent_pipeline
+from core.ai import ConversationManager, execute_agent_pipeline
 from core.device import get_hardware_identifiers, get_key_storage_info
 from database import (
     add_message,
@@ -46,6 +46,9 @@ class DashboardScreen(QWidget):
     def __init__(self):
         super().__init__()
         load_application_fonts()
+
+        # Conversation manager — persistent memory + bounded history for Qwen3 4B.
+        self.conversation_manager = ConversationManager()
 
         self.setWindowTitle("Vault AI")
         self.setStyleSheet("background-color: #050B15;")
@@ -615,21 +618,27 @@ class DashboardScreen(QWidget):
             update_session_title(self.current_session_id, title_candidate)
             self.reload_sessions()
 
-        # 1. Save user message to database
+        # 1. Save user message to SQLite first so it is included in the bounded slice.
         add_message(self.current_session_id, role="user", content=text)
         self.reload_messages()
         self.message_sent.emit(text)
+
+        # Retrieve a bounded history slice (last N messages) to pass to Qwen3 4B.
+        # This prevents unbounded context growth on CPU-only hardware.
+        conversation_history = self.conversation_manager.get_bounded_history(
+            self.current_session_id
+        )
 
         # 2. Set thinking state and trigger agent pipeline
         self.is_thinking = True
         self.update()
 
         # Execute agent pipeline asynchronously via timer
-        QTimer.singleShot(150, lambda: self._process_agent_response(text))
+        QTimer.singleShot(150, lambda: self._process_agent_response(text, conversation_history))
 
-    def _process_agent_response(self, query: str):
+    def _process_agent_response(self, query: str, conversation_history=None):
         try:
-            agent_result = execute_agent_pipeline(query)
+            agent_result = execute_agent_pipeline(query, conversation_history=conversation_history)
             add_message(
                 self.current_session_id,
                 role=agent_result.get("role", "assistant"),

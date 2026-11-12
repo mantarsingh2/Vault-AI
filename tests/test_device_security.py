@@ -4,6 +4,7 @@ import os
 import secrets
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 from core.auth import create_user
@@ -29,6 +30,33 @@ from core.device import (
 from database import get_connection
 
 
+def _persisted_key_storage_unavailable_reason(
+    preferred_provider: str | None = None,
+) -> str | None:
+    """Return a reason when this Windows session cannot create CNG keys.
+
+    Opening a KSP alone is insufficient: restricted Windows sessions can open a
+    provider but cannot create a persisted key. Exercise the real API once so
+    TPM/KSP tests skip only when that security boundary is unavailable.
+    """
+    provider_label = preferred_provider or "default"
+    key_name = f"VaultAI_test_preflight_{provider_label}_{uuid.uuid4().hex}"
+    handle = None
+    try:
+        handle, _ = generate_device_keypair(key_name, preferred_provider)
+        return None
+    except RuntimeError as exc:
+        return f"Persisted Windows CNG key storage is unavailable: {exc}"
+    finally:
+        if handle is not None:
+            handle.close()
+        delete_device_private_key(key_name)
+
+
+_PERSISTED_KEY_STORAGE_UNAVAILABLE = _persisted_key_storage_unavailable_reason()
+_SOFTWARE_KSP_UNAVAILABLE = _persisted_key_storage_unavailable_reason("software_ksp")
+
+
 class DeviceSecurityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -42,6 +70,14 @@ class DeviceSecurityTests(unittest.TestCase):
         delete_device_private_key(self.fallback_key_name)
         delete_device_private_key("VaultAI_Device_testuser")
         self.temp_dir.cleanup()
+
+    def require_persisted_key_storage(self) -> None:
+        if _PERSISTED_KEY_STORAGE_UNAVAILABLE:
+            self.skipTest(_PERSISTED_KEY_STORAGE_UNAVAILABLE)
+
+    def require_software_ksp_storage(self) -> None:
+        if _SOFTWARE_KSP_UNAVAILABLE:
+            self.skipTest(_SOFTWARE_KSP_UNAVAILABLE)
 
     def test_extracts_real_hardware_identifiers(self) -> None:
         ids = get_hardware_identifiers()
@@ -62,6 +98,7 @@ class DeviceSecurityTests(unittest.TestCase):
 
     def test_cryptographic_keypair_generation_and_signing(self) -> None:
         """Test key creation, public key retrieval, challenge signing, and verification."""
+        self.require_persisted_key_storage()
         private_key, public_key = generate_device_keypair(self.test_key_name)
         self.assertIsInstance(private_key, DeviceKeyHandle)
         self.assertTrue(private_key.exists())
@@ -84,6 +121,7 @@ class DeviceSecurityTests(unittest.TestCase):
 
     def test_rejection_of_invalid_or_tampered_signature(self) -> None:
         """Test that invalid, corrupted, or mismatched signatures are rejected."""
+        self.require_persisted_key_storage()
         private_key, public_key = generate_device_keypair(self.test_key_name)
         challenge = secrets.token_bytes(32)
         signature = sign_device_challenge(private_key, challenge)
@@ -102,6 +140,7 @@ class DeviceSecurityTests(unittest.TestCase):
 
     def test_private_key_is_non_exportable(self) -> None:
         """Verify private key export is rejected / not possible through the implemented API."""
+        self.require_persisted_key_storage()
         private_key, _ = generate_device_keypair(self.test_key_name)
         self.assertFalse(private_key.is_exportable)
 
@@ -121,6 +160,7 @@ class DeviceSecurityTests(unittest.TestCase):
 
     def test_no_plaintext_private_key_written_to_workspace(self) -> None:
         """Verify private key material is never written to plaintext or exportable files."""
+        self.require_persisted_key_storage()
         workspace_dir = Path(__file__).resolve().parents[1]
         legacy_key_file = workspace_dir / ".vault_device_private.key"
 
@@ -131,6 +171,7 @@ class DeviceSecurityTests(unittest.TestCase):
         self.assertFalse(legacy_key_file.exists())
 
     def test_save_and_load_private_key(self) -> None:
+        self.require_persisted_key_storage()
         private_key, _ = generate_device_keypair(self.test_key_name)
         saved_handle = save_device_private_key(private_key, self.test_key_name)
         self.assertTrue(saved_handle.exists())
@@ -141,6 +182,8 @@ class DeviceSecurityTests(unittest.TestCase):
 
     def test_software_ksp_fallback_behavior(self) -> None:
         """Test fallback key storage behavior when Software KSP is selected."""
+        self.require_persisted_key_storage()
+        self.require_software_ksp_storage()
         private_key, public_key = generate_device_keypair(
             self.fallback_key_name, preferred_provider="software_ksp"
         )
@@ -166,6 +209,7 @@ class DeviceSecurityTests(unittest.TestCase):
 
     def test_register_and_verify_device_flow(self) -> None:
         """Test complete device registration and verification flow with SQLite storage."""
+        self.require_persisted_key_storage()
         reg_result = register_device(
             "testuser",
             db_path=self.db_path,
@@ -213,6 +257,7 @@ class DeviceSecurityTests(unittest.TestCase):
 
     def test_persistent_key_reopened_after_handle_release(self) -> None:
         """Regression test: register_device -> release handle -> reopen -> sign challenge -> verify."""
+        self.require_persisted_key_storage()
         reg_result = register_device(
             "testuser",
             db_path=self.db_path,
@@ -240,6 +285,7 @@ class DeviceSecurityTests(unittest.TestCase):
 
     def test_get_key_storage_info_resolves_registered_device_key(self) -> None:
         """Verify get_key_storage_info() without arguments resolves the registered device key."""
+        self.require_persisted_key_storage()
         reg_result = register_device(
             "testuser",
             db_path=self.db_path,

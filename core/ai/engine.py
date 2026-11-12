@@ -2,56 +2,33 @@
 
 from __future__ import annotations
 
-import json
-import urllib.request
-import urllib.error
 from typing import Any
 
 from core.ai.router import Intent, classify_intent
+from core.ai.local_model import LocalModelError, local_model
 from core.device import get_hardware_identifiers, get_key_storage_info
 from core.files import format_directory_listing
 from core.system import format_system_summary, get_system_metrics
 
 
-OLLAMA_API_URL = "http://localhost:11434/api/generate"
-DEFAULT_LOCAL_MODEL = "qwen2.5:latest"
-
-
 def is_ollama_available() -> bool:
     """Check if local Ollama inference server is online."""
-    try:
-        req = urllib.request.Request("http://localhost:11434/api/tags", headers={"User-Agent": "VaultAI"})
-        with urllib.request.urlopen(req, timeout=1.5) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
+    return local_model.is_available()
 
 
 def query_ollama(prompt: str, system_prompt: str = "") -> str | None:
-    """Send a prompt to the local Ollama LLM if available."""
+    """Compatibility wrapper that queries the configured local chat model."""
     try:
-        payload = {
-            "model": DEFAULT_LOCAL_MODEL,
-            "prompt": prompt,
-            "system": system_prompt or "You are Vault AI, a helpful, secure, resource-aware AI desktop agent.",
-            "stream": False,
-        }
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            OLLAMA_API_URL,
-            data=data,
-            headers={"Content-Type": "application/json", "User-Agent": "VaultAI"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            if resp.status == 200:
-                result = json.loads(resp.read().decode("utf-8"))
-                return result.get("response", "").strip()
-    except Exception:
+        messages = ([{"role": "system", "content": system_prompt}] if system_prompt else [])
+        messages.append({"role": "user", "content": prompt})
+        return local_model.chat(messages)
+    except LocalModelError:
         return None
-    return None
 
 
-def execute_agent_pipeline(user_query: str) -> dict[str, Any]:
+def execute_agent_pipeline(
+    user_query: str, conversation_history: list[dict[str, str]] | None = None
+) -> dict[str, Any]:
     """Execute the full agent loop (Understand -> Plan -> Check -> Execute -> Verify -> Respond)."""
     intent = classify_intent(user_query)
     
@@ -120,9 +97,10 @@ def execute_agent_pipeline(user_query: str) -> dict[str, Any]:
     # -------------------------------------------------------------
     elif intent == Intent.COMPLEX_TASK:
         # Check if Ollama is available to expand the plan
-        ollama_response = query_ollama(
-            f"Create a step-by-step execution plan for the desktop agent request: '{user_query}'"
-        ) if is_ollama_available() else None
+        ollama_response = _query_local_model(
+            user_query, conversation_history,
+            instruction="Create a step-by-step plan for this desktop assistant request. Do not claim to execute it.",
+        )
 
         if ollama_response:
             plan_content = ollama_response
@@ -178,16 +156,15 @@ def execute_agent_pipeline(user_query: str) -> dict[str, Any]:
     # 6. General Reasoning & Knowledge Queries
     # -------------------------------------------------------------
     else:
-        if is_ollama_available():
-            llm_text = query_ollama(user_query)
-            if llm_text:
-                return {
-                    "role": "assistant",
-                    "content": llm_text,
-                    "intent": intent.value,
-                    "status": "success",
-                    "steps": ["Routed to Local Qwen Model", "Inference Completed"],
-                }
+        llm_text = _query_local_model(user_query, conversation_history)
+        if llm_text:
+            return {
+                "role": "assistant",
+                "content": llm_text,
+                "intent": intent.value,
+                "status": "success",
+                "steps": ["Routed to Local Qwen3 4B", "Inference Completed"],
+            }
 
         # Offline / Local fallback reasoning
         response_text = (
@@ -205,3 +182,24 @@ def execute_agent_pipeline(user_query: str) -> dict[str, Any]:
             "status": "success",
             "steps": ["Analyzed Query", "Local Rules Checked", "Generated Safe Response"],
         }
+
+
+def _query_local_model(
+    user_query: str,
+    conversation_history: list[dict[str, str]] | None = None,
+    instruction: str | None = None,
+) -> str | None:
+    """Ask Ollama using caller-owned conversation history."""
+    messages = [
+        {"role": message["role"], "content": message["content"]}
+        for message in (conversation_history or [])
+        if message.get("role") in {"user", "assistant"} and message.get("content")
+    ]
+    if instruction:
+        messages.append({"role": "user", "content": f"{instruction}\n\nRequest: {user_query}"})
+    else:
+        messages.append({"role": "user", "content": user_query})
+    try:
+        return local_model.chat(messages)
+    except LocalModelError:
+        return None
