@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, Callable
 
 
 OLLAMA_BASE_URL = "http://localhost:11434"
@@ -61,15 +61,22 @@ class OllamaService:
                 if response.status != 200:
                     return False
                 tags = json.loads(response.read().decode("utf-8"))
-            return any(item.get("name") == self.model for item in tags.get("models", []))
+            models = [item.get("name") for item in tags.get("models", [])]
+            if self.model in models:
+                return True
+            for m in models:
+                if m and "qwen" in str(m).lower():
+                    self.model = m
+                    return True
+            return False
         except (OSError, ValueError, urllib.error.URLError):
             return False
 
-    def chat(self, messages: list[dict[str, str]]) -> str:
+    def chat(self, messages: list[dict[str, str]], on_chunk: Callable[[str], None] | None = None) -> str:
         payload = {
             "model": self.model,
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *messages],
-            "stream": False,
+            "stream": on_chunk is not None,
             # qwen3:4b is a thinking-only model. Explicitly request its supported
             # mode so Ollama returns reasoning separately in message.thinking and
             # the UI receives only message.content.
@@ -84,8 +91,22 @@ class OllamaService:
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                result: dict[str, Any] = json.loads(response.read().decode("utf-8"))
-            content = result.get("message", {}).get("content", "").strip()
+                if on_chunk is not None:
+                    pieces: list[str] = []
+                    for line in response:
+                        if line:
+                            try:
+                                chunk = json.loads(line.decode("utf-8"))
+                                delta = chunk.get("message", {}).get("content", "")
+                                if delta:
+                                    pieces.append(delta)
+                                    on_chunk(delta)
+                            except Exception:
+                                pass
+                    content = "".join(pieces).strip()
+                else:
+                    result: dict[str, Any] = json.loads(response.read().decode("utf-8"))
+                    content = result.get("message", {}).get("content", "").strip()
             if not content:
                 raise LocalModelError("The local model returned an empty response.")
             return content

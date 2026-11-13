@@ -32,17 +32,24 @@ ASSETS_DIR = BASE_DIR / "ui" / "assets"
 
 
 class PipelineWorker(QThread):
+    chunk_signal = Signal(str)
     finished_signal = Signal(dict)
     error_signal = Signal(str)
 
-    def __init__(self, query: str, session_id: str, parent=None):
+    def __init__(self, query: str, session_id: str, conversation_history: list[dict[str, str]] | None = None, parent=None):
         super().__init__(parent)
         self.query = query
         self.session_id = session_id
+        self.conversation_history = conversation_history or []
 
     def run(self):
         try:
-            result = execute_agent_pipeline(self.query, session_id=self.session_id)
+            result = execute_agent_pipeline(
+                self.query,
+                session_id=self.session_id,
+                conversation_history=self.conversation_history,
+                on_chunk=self.chunk_signal.emit,
+            )
             self.finished_signal.emit(result)
         except Exception as e:
             self.error_signal.emit(str(e))
@@ -91,6 +98,7 @@ class DashboardScreen(QWidget):
         self.hovered_item: str | None = None
         self.selected_chat_index = 0
         self.is_thinking = False
+        self.streaming_content = ""
         self.show_security_modal = False
 
         # Cursor blink timer
@@ -459,6 +467,41 @@ class DashboardScreen(QWidget):
         y_cursor = 750 + self.scroll_y
         card_spacing = 18
 
+        # Render streaming assistant response if actively generating
+        if self.streaming_content:
+            stream_text = self.streaming_content + " ▌"
+            painter.setFont(figma_font("Roboto", 14, QFont.Weight.Normal))
+            text_rect = QRectF(0, 0, 860, 2000)
+            bounds = painter.boundingRect(text_rect, Qt.TextFlag.TextWordWrap, stream_text)
+            card_w = 930
+            card_h = bounds.height() + 55
+
+            card_x = 440
+            card_y = y_cursor - card_h
+
+            painter.setPen(QPen(QColor("#2E8DE7"), 1.2))
+            painter.setBrush(QColor("#081120"))
+            painter.drawRoundedRect(QRectF(card_x, card_y, card_w, card_h), 12, 12)
+
+            painter.drawPixmap(card_x + 16, card_y + 14, 20, 20, self.assets[0])
+            painter.setFont(figma_font("Inter", 13, QFont.Weight.Bold))
+            painter.setPen(QColor("#2E8DE7"))
+            painter.drawText(card_x + 44, card_y + 29, "Vault AI Assistant (Live)")
+
+            painter.setFont(figma_font("Roboto", 11, QFont.Weight.Medium))
+            painter.setPen(QColor("#72E3F3"))
+            painter.drawText(card_x + card_w - 180, card_y + 29, "[GENERATING]")
+
+            painter.setFont(figma_font("Roboto", 14, QFont.Weight.Normal))
+            painter.setPen(QColor("#E2E8F0"))
+            painter.drawText(
+                QRectF(card_x + 18, card_y + 44, card_w - 36, card_h - 50),
+                Qt.TextFlag.TextWordWrap,
+                stream_text,
+            )
+
+            y_cursor = card_y - card_spacing
+
         for msg in reversed(self.messages):
             is_user = msg["role"] == "user"
             content = msg["content"]
@@ -527,7 +570,7 @@ class DashboardScreen(QWidget):
                 y_cursor = card_y - card_spacing
 
         # If Assistant is thinking, draw pulsing indicator
-        if self.is_thinking:
+        if self.is_thinking and not self.streaming_content:
             think_rect = QRectF(440, y_cursor - 45, 340, 38)
             painter.setPen(QPen(QColor("#2E8DE7"), 1.0))
             painter.setBrush(QColor("#0C1B33"))
@@ -665,14 +708,27 @@ class DashboardScreen(QWidget):
         self.reload_messages()
         self.message_sent.emit(text)
 
-        # 2. Set thinking state and trigger agent pipeline asynchronously in background
+        # 2. Retrieve bounded history for local model context
+        conversation_history = self.conversation_manager.get_bounded_history(
+            self.current_session_id
+        )
+
+        # 3. Set thinking state and trigger agent pipeline asynchronously in background
         self.is_thinking = True
         self.update()
 
-        self.pipeline_worker = PipelineWorker(text, str(self.current_session_id), self)
+        self.pipeline_worker = PipelineWorker(
+            text, str(self.current_session_id), conversation_history, self
+        )
+        self.pipeline_worker.chunk_signal.connect(self._on_agent_chunk)
         self.pipeline_worker.finished_signal.connect(self._on_agent_finished)
         self.pipeline_worker.error_signal.connect(self._on_agent_error)
         self.pipeline_worker.start()
+
+    def _on_agent_chunk(self, chunk: str):
+        self.is_thinking = False
+        self.streaming_content += chunk
+        self.update()
 
     def _on_agent_finished(self, agent_result: dict):
         add_message(
@@ -683,6 +739,7 @@ class DashboardScreen(QWidget):
             status=agent_result.get("status", "success"),
         )
         self.is_thinking = False
+        self.streaming_content = ""
         self.reload_messages()
         self.reload_sessions()
         self.update()
@@ -695,6 +752,7 @@ class DashboardScreen(QWidget):
             status="error",
         )
         self.is_thinking = False
+        self.streaming_content = ""
         self.reload_messages()
         self.reload_sessions()
         self.update()

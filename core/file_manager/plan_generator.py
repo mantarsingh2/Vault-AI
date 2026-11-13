@@ -1,11 +1,9 @@
 """AI Organization Plan generator and response validator for Vault AI."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import json
 import re
 
-from core.ai.ollama_client import OllamaClient
-from core.ai.prompts import ORGANIZATION_SYSTEM_PROMPT, build_organization_prompt
 from .models import OrganizationSuggestion, ScanReport
 from .security import SecurityManager
 
@@ -67,11 +65,18 @@ def safe_parse_json(raw_text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+from core.ai.prompts import ORGANIZATION_SYSTEM_PROMPT, build_organization_prompt
+
+
 class PlanGenerator:
     """Coordinates with Ollama to generate and validate file organization suggestions."""
 
-    def __init__(self, ollama_client: Optional[OllamaClient] = None, security_manager: Optional[SecurityManager] = None):
-        self.client = ollama_client or OllamaClient()
+    def __init__(self, ollama_client: Optional[Any] = None, security_manager: Optional[SecurityManager] = None):
+        if ollama_client is None:
+            from core.ai.ollama_client import OllamaClient
+            self.client = OllamaClient()
+        else:
+            self.client = ollama_client
         self.security = security_manager or SecurityManager()
 
     def generate_organization_plan(self, report: ScanReport) -> Dict[str, Any]:

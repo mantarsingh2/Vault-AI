@@ -31,6 +31,17 @@ class FakeResponse:
         return self.payload
 
 
+class FakeStreamResponse:
+    def __init__(self, lines):
+        self.lines = lines
+
+    def __enter__(self):
+        return self.lines
+
+    def __exit__(self, *_args):
+        return False
+
+
 class LocalModelTests(unittest.TestCase):
     def setUp(self):
         self.service = OllamaService(base_url="http://ollama.test", model="qwen3:4b")
@@ -68,6 +79,18 @@ class LocalModelTests(unittest.TestCase):
         with self.assertRaisesRegex(LocalModelError, "ollama pull qwen3:4b") as raised:
             self.service.chat([{"role": "user", "content": "Hi"}])
         self.assertNotIn("raw private detail", str(raised.exception))
+
+    @patch("core.ai.local_model.urllib.request.urlopen")
+    def test_chat_streams_tokens_via_callback(self, urlopen):
+        stream_lines = [
+            json.dumps({"message": {"content": "Hello "}}).encode("utf-8"),
+            json.dumps({"message": {"content": "World!"}}).encode("utf-8"),
+        ]
+        urlopen.return_value = FakeStreamResponse(stream_lines)
+        collected = []
+        result = self.service.chat([{"role": "user", "content": "Hi"}], on_chunk=collected.append)
+        self.assertEqual(result, "Hello World!")
+        self.assertEqual(collected, ["Hello ", "World!"])
 
     @patch("core.ai.engine.local_model.chat", return_value="Qwen3 generated answer.")
     def test_general_query_reaches_local_model_and_returns_its_response(self, chat):
