@@ -1,5 +1,6 @@
 """Local AI reasoning engine and execution pipeline for Vault AI."""
 
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -14,7 +15,7 @@ from core.file_manager.analyzer import FileAnalyzer
 from core.file_manager.scanner import FileScanner
 from core.file_manager.executor import execute_organization_plan
 from core.system.monitor import format_system_summary
-
+from core.ai.orchestration.graph import vault_graph
 # Global in-memory state for pending file operations
 PENDING_ACTIONS: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -191,34 +192,93 @@ def execute_agent_pipeline(user_query: str, session_id: str = "default") -> Dict
     # -------------------------------------------------------------
     # 4. Complex Multi-Step Task Planning Intent
     # -------------------------------------------------------------
+   
+    # -------------------------------------------------------------
+    # 4. Complex Multi-Step Task Planning — LangGraph
+    # -------------------------------------------------------------
     elif intent == Intent.COMPLEX_TASK:
-        ollama_response = query_ollama(
-            f"Create a step-by-step execution plan for the desktop agent request: '{user_query}'"
-        ) if is_ollama_available() else None
+        try:
+            graph_result = vault_graph.invoke({
+                "user_query": user_query,
+                "session_id": session_id,
+                "status": "new",
+                "steps": [],
+            })
 
-        if ollama_response:
-            plan_content = ollama_response
-        else:
-            plan_content = (
-                f"### 📋 **Execution Plan: {user_query}**\n\n"
-                f"1. **Analyze Requirements & Environment** — Inspect hardware prerequisites and compatibility.\n"
-                f"2. **Resource Pre-Check** — Validate available CPU/RAM before task initialization.\n"
-                f"3. **Execute Controlled Setup** — Execute designated tools via safe Execution Manager.\n"
-                f"4. **Post-Execution Verification** — Verify output state and test for successful completion.\n"
-                f"5. **Log & Finalize** — Record execution history to SQLite database."
+            graph_status = graph_result.get("status", "failed")
+            plan = graph_result.get("plan", [])
+            response_text = graph_result.get(
+                "response",
+                "LangGraph completed without a response."
             )
 
-        response_text = (
-            f"{plan_content}\n\n"
-            f"> ⚙️ **Vault Policy:** Ready to execute upon your confirmation."
-        )
-        return {
-            "role": "assistant",
-            "content": response_text,
-            "intent": intent.value,
-            "status": "success",
-            "steps": ["Intent Classified as Multi-Step", "Plan Generated", "Resource Feasibility Checked"],
-        }
+            # Format generated plan for the frontend chat
+            if plan:
+                plan_lines = [
+                    "### 📋 Execution Plan",
+                    "",
+                ]
+
+                for item in plan:
+                    step_number = item.get("step", "?")
+                    description = item.get("description", "")
+                    step_type = item.get("type", "general")
+
+                    plan_lines.append(
+                        f"{step_number}. **{description}** "
+                        f"(`{step_type}`)"
+                    )
+
+                response_text += "\n\n" + "\n".join(plan_lines)
+
+            if graph_status == "awaiting_approval":
+                response_text += (
+                    "\n\n> 🔐 **Approval Required:** "
+                    "Review this plan before any operation is executed."
+                )
+            elif graph_status == "blocked":
+                response_text += (
+                    "\n\n> ⚠️ **Planning Blocked:** "
+                    "Available resources are insufficient."
+                )
+
+            return {
+                "role": "assistant",
+                "content": response_text,
+                "intent": intent.value,
+                "status": graph_status,
+                "steps": graph_result.get("steps", []),
+                "plan": plan,
+                "plan_hash": graph_result.get("plan_hash"),
+                "approval_required": graph_result.get(
+                    "approval_required", False
+                ),
+                "approval_status": graph_result.get(
+                    "approval_status", "not_required"
+                ),
+                "resource_assessment": graph_result.get(
+                    "resource_assessment", {}
+                ),
+                "model_assessment": graph_result.get(
+                    "model_assessment", {}
+                ),
+                "error": graph_result.get("error"),
+            }
+
+        except Exception as exc:
+            return {
+                "role": "assistant",
+                "content": (
+                    "LangGraph could not process this task. "
+                    "No task execution was performed."
+                ),
+                "intent": intent.value,
+                "status": "failed",
+                "steps": ["LangGraph integration error"],
+                "error": str(exc),
+                "approval_required": False,
+                "approval_status": "not_required",
+            }
 
     # -------------------------------------------------------------
     # 5. Casual Chat / Greetings
