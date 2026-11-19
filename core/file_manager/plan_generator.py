@@ -4,8 +4,6 @@ from typing import Any, Dict, List, Optional
 import json
 import re
 
-from core.ai.ollama_client import OllamaClient
-from core.ai.prompts import ORGANIZATION_SYSTEM_PROMPT, build_organization_prompt
 from .models import OrganizationSuggestion, ScanReport
 from .security import SecurityManager
 
@@ -65,6 +63,10 @@ def safe_parse_json(raw_text: str) -> Optional[Dict[str, Any]]:
                 continue
 
     return None
+
+
+from core.ai.ollama_client import OllamaClient
+from core.ai.prompts import ORGANIZATION_SYSTEM_PROMPT, build_organization_prompt
 
 
 class PlanGenerator:

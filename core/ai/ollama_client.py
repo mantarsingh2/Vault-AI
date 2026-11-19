@@ -75,6 +75,31 @@ class OllamaClient:
                 return True
         return False
 
+    def list_running_models(self, timeout: float = 2.0) -> List[Dict[str, Any]]:
+        """List currently loaded/running models in Ollama memory."""
+        try:
+            req = urllib.request.Request(
+                f"{self.base_url}/api/ps",
+                headers={"User-Agent": "Vault-AI/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode("utf-8"))
+                    return data.get("models", [])
+        except Exception:
+            pass
+        return []
+
+    def is_model_loaded(self, model_name: Optional[str] = None, timeout: float = 2.0) -> bool:
+        """Check if model is currently loaded in memory."""
+        target = (model_name or self.default_model).lower()
+        running = self.list_running_models(timeout=timeout)
+        for m in running:
+            name = m.get("name", "").lower()
+            if name == target or name.split(":")[0] == target.split(":")[0]:
+                return True
+        return False
+
     def generate(
         self,
         prompt: str,

@@ -71,8 +71,17 @@ class SecurityManager:
                 candidates.append(od_path / name)
 
         for path in candidates:
-            if path and path.exists() and path.is_dir():
-                self._authorized_roots.add(path.resolve())
+            try:
+                if path and path.exists() and path.is_dir():
+                    self._authorized_roots.add(path.resolve())
+            except (PermissionError, OSError):
+                continue
+
+        # Always include active workspace / project root
+        try:
+            self._authorized_roots.add(Path.cwd().resolve())
+        except Exception:
+            pass
 
     def get_authorized_roots(self) -> List[Path]:
         """Return a sorted list of current authorized root directories."""

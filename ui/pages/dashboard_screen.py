@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import socket
 import time
 from pathlib import Path
@@ -46,6 +47,69 @@ class PipelineWorker(QThread):
             self.finished_signal.emit(result)
         except Exception as e:
             self.error_signal.emit(str(e))
+
+
+def format_chat_content(content: str) -> str:
+    """Format markdown tables, headings, and formatting into clean, structured text for QPainter."""
+    if not content:
+        return ""
+
+    lines = content.splitlines()
+    clean_lines = []
+    in_table = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Handle empty lines
+        if not stripped:
+            if not in_table:
+                clean_lines.append("")
+            continue
+
+        # Skip markdown table divider lines like | :--- | :--- | or | :-- | or | --- |
+        if stripped.startswith("|") and re.match(r"^\|?[\s:\-]+(\|[\s:\-]+)+\|?$", stripped):
+            in_table = True
+            continue
+
+        # Convert markdown table rows into clean bullet points with headers preserved
+        if stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2:
+            raw_cells = [c.strip() for c in stripped.split("|")[1:-1]]
+            cells = [re.sub(r"[`*]", "", c).strip() for c in raw_cells if c.strip()]
+            if not in_table:
+                # Table header row
+                in_table = True
+                header_text = " | ".join(cells)
+                clean_lines.append(f"  {header_text}")
+                clean_lines.append("  " + "─" * min(60, max(20, len(header_text))))
+                continue
+            else:
+                if cells:
+                    first = cells[0]
+                    rest = cells[1:]
+                    if rest:
+                        clean_lines.append(f"  • {first} — {' | '.join(rest)}")
+                    else:
+                        clean_lines.append(f"  • {first}")
+                continue
+        else:
+            in_table = False
+
+        # Clean leading header markers like '### ' for smooth readability
+        line_clean = re.sub(r"^#{1,6}\s*", "", line)
+        # Strip raw markdown bold/italic/code markers for clean canvas display
+        line_clean = re.sub(r"\*\*(.*?)\*\*", r"\1", line_clean)
+        line_clean = re.sub(r"\*(.*?)\*", r"\1", line_clean)
+        line_clean = re.sub(r"`(.*?)`", r"\1", line_clean)
+        # Format bullet points consistently
+        line_clean = re.sub(r"^\s*[\*\-]\s+", "• ", line_clean)
+        # Strip blockquotes
+        line_clean = re.sub(r"^>\s*", "", line_clean)
+        clean_lines.append(line_clean)
+
+    # Collapse excessive blank lines
+    result = re.sub(r"\n{3,}", "\n\n", "\n".join(clean_lines)).strip()
+    return result
 
 
 class DashboardScreen(QWidget):
@@ -459,6 +523,27 @@ class DashboardScreen(QWidget):
         y_cursor = 750 + self.scroll_y
         card_spacing = 18
 
+        # If Assistant is thinking, render the thinking indicator directly under the user's latest query
+        if self.is_thinking:
+            think_h = 42
+            think_y = y_cursor - think_h
+            think_rect = QRectF(440, think_y, 360, think_h)
+
+            painter.setPen(QPen(QColor("#2E8DE7"), 1.2))
+            painter.setBrush(QColor("#081120"))
+            painter.drawRoundedRect(think_rect, 10, 10)
+
+            painter.drawPixmap(int(think_rect.left() + 14), int(think_rect.top() + 11), 20, 20, self.assets[0])
+            painter.setFont(figma_font("Roboto", 13, QFont.Weight.Medium))
+            painter.setPen(QColor("#72E3F3"))
+            painter.drawText(
+                QRectF(think_rect.left() + 42, think_rect.top(), think_rect.width() - 48, think_rect.height()),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                "🧠 Vault AI is analyzing & executing...",
+            )
+
+            y_cursor = think_y - card_spacing
+
         for msg in reversed(self.messages):
             is_user = msg["role"] == "user"
             content = msg["content"]
@@ -489,12 +574,12 @@ class DashboardScreen(QWidget):
 
             else:
                 # Assistant Message Card (Left Aligned)
-                lines = content.split("\n")
+                display_content = format_chat_content(content)
                 painter.setFont(figma_font("Roboto", 14, QFont.Weight.Normal))
-                text_rect = QRectF(0, 0, 860, 2000)
-                bounds = painter.boundingRect(text_rect, Qt.TextFlag.TextWordWrap, content)
+                text_rect = QRectF(0, 0, 860, 4000)
+                bounds = painter.boundingRect(text_rect, Qt.TextFlag.TextWordWrap, display_content)
                 card_w = 930
-                card_h = bounds.height() + 55
+                card_h = bounds.height() + 65
 
                 card_x = 440
                 card_y = y_cursor - card_h
@@ -519,22 +604,12 @@ class DashboardScreen(QWidget):
                 painter.setFont(figma_font("Roboto", 14, QFont.Weight.Normal))
                 painter.setPen(QColor("#E2E8F0"))
                 painter.drawText(
-                    QRectF(card_x + 18, card_y + 44, card_w - 36, card_h - 50),
+                    QRectF(card_x + 18, card_y + 44, card_w - 36, bounds.height() + 15),
                     Qt.TextFlag.TextWordWrap,
-                    content,
+                    display_content,
                 )
 
                 y_cursor = card_y - card_spacing
-
-        # If Assistant is thinking, draw pulsing indicator
-        if self.is_thinking:
-            think_rect = QRectF(440, y_cursor - 45, 340, 38)
-            painter.setPen(QPen(QColor("#2E8DE7"), 1.0))
-            painter.setBrush(QColor("#0C1B33"))
-            painter.drawRoundedRect(think_rect, 8, 8)
-            painter.setFont(figma_font("Roboto", 13, QFont.Weight.Medium))
-            painter.setPen(QColor("#72E3F3"))
-            painter.drawText(think_rect, Qt.AlignmentFlag.AlignCenter, "🧠 Vault AI is analyzing & planning...")
 
         painter.restore()
 

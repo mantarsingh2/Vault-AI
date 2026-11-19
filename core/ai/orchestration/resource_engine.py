@@ -19,12 +19,12 @@ class ResourceEngine:
     """Collect and assess system resources for Vault AI."""
 
     # General system thresholds (GB)
-    CRITICAL_RAM_GB = 2.0
-    HEALTHY_RAM_GB = 4.0
+    CRITICAL_RAM_GB = 1.5
+    HEALTHY_RAM_GB = 3.5
 
-    # Configurable model estimates (GB)
-    DEFAULT_MODEL_RAM_GB = 8.0
-    DEFAULT_MODEL_VRAM_GB = 4.0
+    # Configurable model estimates (GB) - for quantized 7B/8B models (e.g. qwen3:8b Q4)
+    DEFAULT_MODEL_RAM_GB = 4.0
+    DEFAULT_MODEL_VRAM_GB = 3.0
 
     def get_cpu_info(self):
         """Collect CPU information."""
@@ -211,43 +211,66 @@ class ResourceEngine:
             else 0
         )
 
-        ram_sufficient = available_ram >= estimated_ram_gb
-
-        gpu_sufficient = (
-            gpu.get("available", False)
-            and available_vram >= estimated_vram_gb
-        )
-
         warnings = []
+
+        # 0. Check if model is already resident in Ollama memory
+        try:
+            from core.ai.ollama_client import OllamaClient
+            client = OllamaClient()
+            if client.is_model_loaded(model_name):
+                return {
+                    "model_name": model_name,
+                    "available_ram_gb": available_ram,
+                    "estimated_ram_gb": estimated_ram_gb,
+                    "available_vram_gb": round(available_vram, 2),
+                    "estimated_vram_gb": estimated_vram_gb,
+                    "ram_sufficient": True,
+                    "gpu_sufficient": True,
+                    "execution_mode": "gpu" if gpu.get("available") else "cpu",
+                    "recommended": True,
+                    "reason": f"Model '{model_name}' is already loaded in memory and ready for inference.",
+                    "warnings": [],
+                }
+        except Exception:
+            pass
+
+        ram_sufficient = available_ram >= estimated_ram_gb
+        total_ram = memory.get("total_gb", 0)
+        gpu_has_capacity = gpu.get("available", False) and (available_vram >= 1.0 or gpu.get("total_vram_mb", 0) >= 3000)
 
         if not ram_sufficient:
             warnings.append(
-                f"Insufficient RAM for {model_name}. "
-                f"Available: {available_ram} GB; "
-                f"estimated requirement: {estimated_ram_gb} GB."
+                f"RAM below estimated optimal requirement for {model_name}. "
+                f"Available: {available_ram} GB; optimal estimate: {estimated_ram_gb} GB."
             )
 
-        if not gpu_sufficient:
+        if not gpu.get("available", False):
             warnings.append(
-                f"Insufficient GPU memory for the configured "
-                f"GPU estimate of {model_name}."
+                f"Dedicated GPU unavailable for {model_name}; will use CPU."
             )
 
-        # CPU is allowed only if sufficient RAM is available.
-        # GPU execution remains disabled until separately validated.
-        if ram_sufficient:
+        # 1. GPU / Hybrid Execution if dedicated GPU is available
+        if gpu_has_capacity:
+            if available_vram >= estimated_vram_gb:
+                execution_mode = "gpu"
+                reason = f"Sufficient dedicated GPU memory ({available_vram:.1f} GB) available for {model_name}."
+            else:
+                execution_mode = "hybrid"
+                reason = f"GPU acceleration ({available_vram:.1f} GB VRAM) available for hybrid inference."
+            recommended = True
+
+        # 2. CPU Execution if RAM is adequate (or total RAM >= 8GB with available RAM >= 1.0GB)
+        elif ram_sufficient or (total_ram >= 8.0 and available_ram >= 1.0):
             execution_mode = "cpu"
             recommended = True
-            reason = (
-                "Available RAM meets the configured model estimate."
-            )
+            reason = f"Available system RAM ({available_ram:.1f} GB) is adequate for {model_name}."
 
+        # 3. Defer only if memory is critically low (< 1 GB free with no GPU)
         else:
             execution_mode = "defer"
             recommended = False
             reason = (
-                "Insufficient available RAM for the configured "
-                "model estimate."
+                f"Insufficient memory ({available_ram:.1f} GB available) to safely load {model_name}."
             )
 
         return {
@@ -257,7 +280,7 @@ class ResourceEngine:
             "available_vram_gb": round(available_vram, 2),
             "estimated_vram_gb": estimated_vram_gb,
             "ram_sufficient": ram_sufficient,
-            "gpu_sufficient": gpu_sufficient,
+            "gpu_sufficient": gpu_has_capacity,
             "execution_mode": execution_mode,
             "recommended": recommended,
             "reason": reason,

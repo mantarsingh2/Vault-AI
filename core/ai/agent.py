@@ -1,6 +1,13 @@
 """Vault AI Assistant Orchestrator and Natural Language Intent Router."""
 
+import sys
 from pathlib import Path
+
+# Ensure project root is in sys.path when executed directly
+_ROOT = str(Path(__file__).resolve().parents[2])
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 from typing import Any, Dict, List, Optional
 import json
 import re
@@ -61,16 +68,32 @@ class VaultAIAgent:
             except Exception:
                 pass
 
+        def safe_exists(p: Optional[Path]) -> bool:
+            if not p:
+                return False
+            try:
+                return p.exists()
+            except (PermissionError, OSError):
+                return False
+
+        def safe_is_dir(p: Optional[Path]) -> bool:
+            if not p:
+                return False
+            try:
+                return p.exists() and p.is_dir()
+            except (PermissionError, OSError):
+                return False
+
         def get_folder(name: str, fallback: Path) -> List[Path]:
             """Return registry path + OneDrive path if they exist."""
             results = []
-            if name in known_folders and known_folders[name].exists():
+            if name in known_folders and safe_exists(known_folders[name]):
                 results.append(known_folders[name].resolve())
             if od_path:
                 od_sub = od_path / name.capitalize()
-                if od_sub.exists():
+                if safe_exists(od_sub):
                     results.append(od_sub.resolve())
-            if not results and fallback.exists():
+            if not results and safe_exists(fallback):
                 results.append(fallback.resolve())
             return results
 
@@ -92,7 +115,7 @@ class VaultAIAgent:
         for kw, paths in candidates.items():
             if kw in prompt_lower:
                 for p in paths:
-                    if p and p.exists() and p.is_dir():
+                    if safe_is_dir(p):
                         resolved.append(p)
 
         # If no specific folder was detected, use all authorized roots from security manager
@@ -282,3 +305,11 @@ class VaultAIAgent:
             "suggestions": suggestions,
             "scanned_folders": [str(f) for f in target_folders],
         }
+
+
+if __name__ == "__main__":
+    prompt = sys.argv[1] if len(sys.argv) > 1 else "List my documents"
+    print(f"Testing VaultAIAgent with: '{prompt}'")
+    agent = VaultAIAgent()
+    res = agent.process_prompt(prompt)
+    print("AI Response:\n", res.get("ai_response"))
