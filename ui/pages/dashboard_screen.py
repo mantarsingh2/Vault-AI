@@ -14,6 +14,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget, QLineEdit
 
 from core.ai import execute_agent_pipeline
+from core.ai.conversation_manager import ConversationManager
 from core.device import get_hardware_identifiers, get_key_storage_info
 from database import (
     add_message,
@@ -83,6 +84,7 @@ class DashboardScreen(QWidget):
         ]
 
         # Active Session State
+        self.conversation_manager = ConversationManager()
         self.current_session_id = ensure_default_session()
         self.sessions: list[dict[str, Any]] = []
         self.messages: list[dict[str, Any]] = []
@@ -688,7 +690,7 @@ class DashboardScreen(QWidget):
     # User Input & Message Handling
     # -------------------------------------------------------------
     def send_composer_message(self):
-        text = self.input_box.text().strip()
+        text = self.input_box.text().strip() or self.composer_text.strip()
         if not text or self.is_thinking:
             return
 
@@ -860,18 +862,21 @@ class DashboardScreen(QWidget):
         # Quick Suggestion Icons in Composer
         if 460 <= x <= 495 and 895 <= y <= 935:
             self.composer_text = "List files in this project"
+            self.input_box.setText(self.composer_text)
             self.composer_cursor = len(self.composer_text)
             self.active_field = "composer"
             self.update()
             return
         elif 500 <= x <= 535 and 895 <= y <= 935:
             self.composer_text = "Check system health and CPU load"
+            self.input_box.setText(self.composer_text)
             self.composer_cursor = len(self.composer_text)
             self.active_field = "composer"
             self.update()
             return
         elif 540 <= x <= 575 and 895 <= y <= 935:
             self.composer_text = "Verify TPM device identity"
+            self.input_box.setText(self.composer_text)
             self.composer_cursor = len(self.composer_text)
             self.active_field = "composer"
             self.update()

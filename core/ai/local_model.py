@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from typing import Any, Callable
@@ -15,34 +16,52 @@ DEFAULT_LOCAL_MODEL = "qwen3:4b"
 # qwen3:4b is currently the Thinking-2507 tag on this Ollama installation.
 # CPU-only inference can take longer than a normal HTTP request while it reaches
 # its final answer, so this is deliberately longer than the availability probe.
-REQUEST_TIMEOUT_SECONDS = 150
-MAX_RESPONSE_TOKENS = 1024
+REQUEST_TIMEOUT_SECONDS = 180
+MAX_RESPONSE_TOKENS = 8192
 
-SYSTEM_PROMPT = """You are the Vault AI Assistant — the integrated local AI inside Vault AI, a secure, offline-first desktop AI application.
+# ENABLE_THINKING = True: Qwen3's chain-of-thought reasoning is routed by
+# Ollama into the separate message.thinking field. Our code reads only
+# message.content, so the UI always receives a clean answer with no reasoning
+# preamble. The token budget must be large enough for BOTH thinking + answer
+# (8192 covers typical reasoning sessions without running out of budget).
+ENABLE_THINKING = True
 
-Your identity facts (always accurate — never contradict these):
-- You are powered by Qwen3 4B, a reasoning model by Alibaba's Tongyi Lab, running locally via Ollama on this machine.
-- Qwen3 IS fully implemented and active. You are the live running instance of it right now.
-- Vault AI is a local-first, privacy-focused desktop assistant built with Python and Qt (PySide6).
-- Vault AI uses TPM-backed or Software KSP cryptographic keys (ECDSA P-256) for device identity.
-- All conversation, reasoning, and AI responses are handled locally by you (Qwen3 4B) — no cloud AI is involved.
+SYSTEM_PROMPT = """You are Vault AI — a secure, offline-first desktop AI assistant powered by Qwen3 4B running locally via Ollama.
 
-Your capabilities (routed by Vault AI's engine):
-- General reasoning, Q&A, explanation, and conversation (handled by you, Qwen3 4B).
-- System monitoring (CPU, RAM, processes) — handled by Vault AI's system tools.
-- File and directory listing — handled by Vault AI's file tools.
-- Device security / TPM identity checks — handled by Vault AI's security backend.
-- Multi-step task planning — you assist in planning, tools execute.
+Identity (always accurate):
+- You are Qwen3 4B by Alibaba's Tongyi Lab, running 100% locally — no cloud, no internet.
+- Vault AI is built with Python + PySide6 (Qt). It uses TPM/ECDSA P-256 for device identity.
+- Qwen3 IS active and fully working right now. Never say it is "not implemented".
 
-Rules:
-- Never claim Qwen3 is "not implemented" — you ARE Qwen3 4B running right now.
-- You cannot directly control the computer, access files, or perform system actions. These require approved Vault AI backend tools.
-- Never bypass, weaken, or ask the user to bypass Vault AI's permission or security layer.
-- Give a concise answer of at most 150 words unless the user explicitly asks for more detail."""
+Capabilities routed by Vault AI's engine:
+- General Q&A, reasoning, explanation → you (Qwen3 4B)
+- CPU / RAM / system monitoring → Vault AI's system tools
+- File search and organisation → Vault AI's file tools
+- Device security / TPM checks → Vault AI's security backend
+- Multi-step task planning → you assist, tools execute
+
+Rules — follow strictly:
+- Be concise: at most 150 words unless the user asks for more.
+- Never bypass or weaken Vault AI's security or permission layer."""
 
 
 class LocalModelError(Exception):
     """Safe, user-facing category for local model failures."""
+
+
+def _strip_thinking(text: str) -> str:
+    """Remove <think>...</think> blocks that Qwen3 may embed in content.
+
+    Even with think=False some Qwen3 builds still emit reasoning inside the
+    visible content field wrapped in <think> tags. Strip them so the user only
+    sees the final answer.
+    """
+    # Remove complete <think>...</think> blocks (greedy=False so we don't
+    # eat content between two separate think blocks)
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # Also strip any dangling opening/closing tags
+    cleaned = re.sub(r"</?think>", "", cleaned)
+    return cleaned.strip()
 
 
 class OllamaService:
@@ -77,10 +96,9 @@ class OllamaService:
             "model": self.model,
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *messages],
             "stream": on_chunk is not None,
-            # qwen3:4b is a thinking-only model. Explicitly request its supported
-            # mode so Ollama returns reasoning separately in message.thinking and
-            # the UI receives only message.content.
-            "think": True,
+            # ENABLE_THINKING=True: Qwen3's reasoning stays in message.thinking;
+            # message.content contains only the final clean answer for the UI.
+            "think": ENABLE_THINKING,
             "options": {"num_predict": MAX_RESPONSE_TOKENS},
         }
         request = urllib.request.Request(
@@ -97,16 +115,22 @@ class OllamaService:
                         if line:
                             try:
                                 chunk = json.loads(line.decode("utf-8"))
+                                # With think=True, Ollama streams thinking tokens into
+                                # message.thinking and answer tokens into message.content.
+                                # Reading only message.content naturally skips all reasoning.
                                 delta = chunk.get("message", {}).get("content", "")
                                 if delta:
                                     pieces.append(delta)
                                     on_chunk(delta)
                             except Exception:
                                 pass
-                    content = "".join(pieces).strip()
+                    content = _strip_thinking("".join(pieces))
                 else:
                     result: dict[str, Any] = json.loads(response.read().decode("utf-8"))
-                    content = result.get("message", {}).get("content", "").strip()
+                    # message.content holds only the final answer; message.thinking
+                    # holds the reasoning — we deliberately ignore it.
+                    raw = result.get("message", {}).get("content", "")
+                    content = _strip_thinking(raw)
             if not content:
                 raise LocalModelError("The local model returned an empty response.")
             return content

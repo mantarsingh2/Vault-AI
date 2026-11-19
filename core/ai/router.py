@@ -41,7 +41,7 @@ _FILE_PATTERNS = [
 ]
 
 _CASUAL_PATTERNS = [
-    r"^(hi|hello|hey|greetings|good morning|good evening|good afternoon|howdy)\b",
+    r"^(hi|hello|hey|hlo|heya|hola|howdy|yo|sup|greetings|good morning|good evening|good afternoon)\b",
     r"\b(who are you|what are you|what can you do|help me|introduce yourself)\b",
     r"^(thanks|thank you|cool|awesome|great)\b",
 ]

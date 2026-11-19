@@ -1,3 +1,4 @@
+
 """SQLite helpers for Vault AI's local application data."""
 
 from __future__ import annotations

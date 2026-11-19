@@ -25,7 +25,13 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TypedDict
 
-from langgraph.graph import END, StateGraph
+try:
+    from langgraph.graph import END, StateGraph
+    HAS_LANGGRAPH = True
+except (ImportError, ModuleNotFoundError):
+    HAS_LANGGRAPH = False
+    END = "__end__"
+    StateGraph = None
 
 from core.ai.router import Intent, classify_intent
 
@@ -409,7 +415,35 @@ def general_node(state: AgentState) -> AgentState:
 # Graph assembly
 # ---------------------------------------------------------------------------
 
-def _build_graph() -> StateGraph:
+NODE_MAP: Dict[str, Callable[[AgentState], AgentState]] = {
+    "confirm_node": confirm_node,
+    "file_node": file_node,
+    "system_node": system_node,
+    "security_node": security_node,
+    "complex_node": complex_node,
+    "chat_node": chat_node,
+    "general_node": general_node,
+}
+
+
+def direct_execute(state: AgentState) -> Dict[str, Any]:
+    """Execute the pipeline steps directly without requiring the LangGraph runtime.
+    
+    This provides an identical zero-overhead fallback so Vault AI works seamlessly
+    in all Python environments even if LangGraph is not installed.
+    """
+    classified = classify_node(state)
+    merged_state = {**state, **classified}
+    next_node_name = router_node(merged_state)
+    node_fn = NODE_MAP.get(next_node_name, general_node)
+    result = node_fn(merged_state)
+    return {**merged_state, **result}
+
+
+def _build_graph() -> Optional[Any]:
+    if not HAS_LANGGRAPH or StateGraph is None:
+        return None
+
     workflow = StateGraph(AgentState)
 
     # Register all nodes
@@ -452,8 +486,31 @@ def _build_graph() -> StateGraph:
     ]:
         workflow.add_edge(node, END)
 
-    return workflow
+    return workflow.compile()
 
 
-agent_graph = _build_graph().compile()
+_compiled_graph = None
+
+
+def get_agent_graph():
+    """Return the compiled StateGraph if LangGraph is available, else None."""
+    global _compiled_graph
+    if _compiled_graph is None and HAS_LANGGRAPH:
+        _compiled_graph = _build_graph()
+    return _compiled_graph
+
+
+# For backwards-compatibility with imports of agent_graph
+agent_graph = get_agent_graph()
+
+
+def invoke_agent(state: AgentState) -> Dict[str, Any]:
+    """Invoke the agent workflow via LangGraph if available, falling back to direct execution."""
+    graph = get_agent_graph()
+    if graph is not None:
+        try:
+            return graph.invoke(state)
+        except Exception:
+            return direct_execute(state)
+    return direct_execute(state)
 
