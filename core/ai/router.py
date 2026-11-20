@@ -7,16 +7,19 @@ from enum import Enum
 
 
 class Intent(str, Enum):
-    SYSTEM_STATUS = "system_status"
-    FILE_OPERATION = "file_operation"
-    SECURITY_CHECK = "security_check"
-    CASUAL_CHAT = "casual_chat"
-    COMPLEX_TASK = "complex_task"
-    GENERAL_QUERY = "general_query"
-    CONFIRM_ACTION = "confirm_action"
+    SYSTEM_STATUS   = "system_status"
+    FILE_OPERATION  = "file_operation"
+    SECURITY_CHECK  = "security_check"
+    CASUAL_CHAT     = "casual_chat"
+    COMPLEX_TASK    = "complex_task"
+    GENERAL_QUERY   = "general_query"
+    CONFIRM_ACTION  = "confirm_action"
 
 
-# Keyword / Regex patterns for rule-based fast classification
+# ---------------------------------------------------------------------------
+# Pattern groups — ordered by priority inside classify_intent()
+# ---------------------------------------------------------------------------
+
 _CONFIRM_PATTERNS = [
     r"^(yes|yep|yeah|do it|proceed|go ahead|kardo|kar do|sure|ok|okay|move them|organize them)\b",
 ]
@@ -31,20 +34,35 @@ _SYSTEM_PATTERNS = [
     r"\b(check (system|hardware|specs|performance))\b",
 ]
 
-_COMPLEX_PATTERNS = [
-    r"\b(plan|create a plan|make a plan|step[- ]by[- ]step|roadmap|architecture|workflow|design|multi-step|develop|setup|install|configure|build|deploy|environment)\b",
-]
-
-# Actions that directly manipulate the filesystem — always FILE_OPERATION
+# Direct filesystem action patterns — checked BEFORE complex to avoid mis-routing
+# "create a folder", "make a file", "delete the folder", "move X to Y", etc.
 _FILE_ACTION_PATTERNS = [
-    r"\b(create|make|mkdir|new)\s+(a\s+)?(folder|directory|dir|file)\b",
-    r"\b(create|make|new)\s+(folder|directory|dir|file)\s+(at|in|to|named?|called?)\b",
-    r"\b(folder|directory)\s+(to|at|in|path)\b",
-    r"\b(delete|remove|rename|move|copy)\s+(the\s+)?(folder|directory|file|files)\b",
-    r"\bdelete\s+file\b",
-    r"\bmove\s+files?\b",
+    # create
+    r"\b(create|make|mkdir|new|add|touch)\s+(a\s+)?(new\s+)?(folder|directory|dir|file)\b",
+    r"\b(folder|directory|file)\s+(named?|called?|at|in|to)\b",
+    # delete / remove
+    r"\b(delete|remove|trash|erase|wipe)\s+(the\s+)?(folder|directory|file|dir)\b",
+    r"\b(delete|remove|trash|erase|wipe)\s+[A-Za-z]:[/\\]",   # direct path
+    # move / cut-paste
+    r"\b(move|cut|transfer|relocate|mv)\s+.{2,50}\s+to\b",
+    r"\bcut\s+and\s+paste\b",
+    # copy / paste
+    r"\b(copy|cp|clone|duplicate)\s+.{2,50}\s+to\b",
+    r"\bcopy\s+and\s+paste\b",
+    r"\bpaste\s+(a\s+)?copy\b",
+    # rename
+    r"\b(rename|rn)\b",
+    r"\bchange\s+(the\s+)?name\b",
+    # list / open
+    r"\b(list|show|display|ls|dir)\s+(files?|folders?|contents?|everything)\b",
+    r"\bshow\s+in\s+explorer\b",
+    r"\bopen\s+(the\s+)?(folder|directory|file)\b",
+    # search / find
+    r"\b(find|search|locate|look\s+for)\s+(files?|folders?|a\s+file)\b",
+    r"\bwhere\s+is\b",
 ]
 
+# Heavier file-related patterns (scan, organize, duplicates)
 _FILE_PATTERNS = [
     r"\b(duplicate|duplicates|wasted space)\b",
     r"\b(organize|organization|cleanup|clean up|sort|categorize)\b",
@@ -54,6 +72,11 @@ _FILE_PATTERNS = [
     r"\b(file|files|folder|folders|directory|directories|dir)\b",
 ]
 
+_COMPLEX_PATTERNS = [
+    r"\b(plan|create a plan|make a plan|step[- ]by[- ]step|roadmap|architecture|workflow"
+    r"|design|multi[- ]step|develop|setup|install|configure|build|deploy|environment)\b",
+]
+
 _CASUAL_PATTERNS = [
     r"^(hi|hello|hey|hlo|heya|hola|howdy|yo|sup|greetings|good morning|good evening|good afternoon)\b",
     r"\b(who are you|what are you|what can you do|help me|introduce yourself)\b",
@@ -61,48 +84,56 @@ _CASUAL_PATTERNS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Classifier
+# ---------------------------------------------------------------------------
+
 def classify_intent(text: str) -> Intent:
-    """Classify user query into primary intent category."""
+    """Classify user query into the primary intent category."""
     query = text.strip().lower()
     if not query:
         return Intent.CASUAL_CHAT
 
-    # 0. Check for confirmations first
-    for pattern in _CONFIRM_PATTERNS:
-        if re.search(pattern, query):
+    # 0 — confirmation shorthand
+    for pat in _CONFIRM_PATTERNS:
+        if re.search(pat, query):
             return Intent.CONFIRM_ACTION
 
-    # 1. Casual Greetings / Introduction
-    for pattern in _CASUAL_PATTERNS:
-        if re.search(pattern, query):
+    # 1 — casual / greeting
+    for pat in _CASUAL_PATTERNS:
+        if re.search(pat, query):
             return Intent.CASUAL_CHAT
 
-    # 2. Security Check
-    for pattern in _SECURITY_PATTERNS:
-        if re.search(pattern, query):
+    # 2 — security / TPM
+    for pat in _SECURITY_PATTERNS:
+        if re.search(pat, query):
             return Intent.SECURITY_CHECK
 
-    # 3. System Monitoring
-    for pattern in _SYSTEM_PATTERNS:
-        if re.search(pattern, query):
+    # 3 — system hardware stats
+    for pat in _SYSTEM_PATTERNS:
+        if re.search(pat, query):
             return Intent.SYSTEM_STATUS
 
-    # 4a. Direct filesystem actions — always FILE_OPERATION (before complex check)
-    for pattern in _FILE_ACTION_PATTERNS:
-        if re.search(pattern, query):
+    # 4 — direct filesystem ACTIONS (create/delete/move/copy/rename/list/search/open)
+    #     Must come before COMPLEX so "create a folder" is never mis-routed
+    for pat in _FILE_ACTION_PATTERNS:
+        if re.search(pat, query):
             return Intent.FILE_OPERATION
 
-    # 4b. Complex Multi-Step Planning (e.g. "plan to build ...", "step-by-step ...")
-    for pattern in _COMPLEX_PATTERNS:
-        if re.search(pattern, query):
-            # If the user specifically asks to organize/clean up files on disk, prefer file operation
-            if any(re.search(fp, query) for fp in [r"\b(duplicate|duplicates)\b", r"\b(organize|cleanup|clean up|sort)\b"]):
+    # 5 — complex multi-step planning
+    for pat in _COMPLEX_PATTERNS:
+        if re.search(pat, query):
+            # Organize/duplicate queries are still file ops
+            if any(re.search(fp, query) for fp in [
+                r"\b(duplicate|duplicates)\b",
+                r"\b(organize|cleanup|clean up|sort)\b",
+            ]):
                 return Intent.FILE_OPERATION
             return Intent.COMPLEX_TASK
 
-    # 5. General File Operations (listing, scanning, etc.)
-    for pattern in _FILE_PATTERNS:
-        if re.search(pattern, query):
+    # 6 — general file scan / browse
+    for pat in _FILE_PATTERNS:
+        if re.search(pat, query):
             return Intent.FILE_OPERATION
 
     return Intent.GENERAL_QUERY

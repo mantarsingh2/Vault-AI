@@ -136,215 +136,34 @@ def confirm_node(state: AgentState) -> AgentState:
 
 
 # ---------------------------------------------------------------------------
-# Node: file_node
+# Node: file_node  — delegates to core.file_manager.operations engine
 # ---------------------------------------------------------------------------
 
-def _extract_path_from_query(query: str) -> Optional[str]:
-    """Extract a file/folder path from a user query using regex heuristics."""
-    import re as _re
-    # Match Windows absolute paths like C:\Users\HP\Documents\Blackmagic Design
-    win_path = _re.search(r'[A-Za-z]:\\(?:[^\s,.\'"!?]+\\?)*[^\s,.\'"!?]+', query)
-    if win_path:
-        return win_path.group(0).rstrip("\\")
-    # Match quoted paths
-    quoted = _re.search(r'["\']([A-Za-z]:\\[^"\']+)["\']', query)
-    if quoted:
-        return quoted.group(1).rstrip("\\")
-    # Match path after keywords: "to the path", "at", "in", "named", "called"
-    keyword_path = _re.search(
-        r'(?:to(?:\s+the)?\s+path|at|in|named?|called?)\s+["\']?([A-Za-z]:\\[^\s,.\'"!?]+)["\']?',
-        query, _re.IGNORECASE
-    )
-    if keyword_path:
-        return keyword_path.group(1).rstrip("\\")
-    return None
-
-
-def _handle_fs_action(query: str) -> Optional[Dict[str, Any]]:
-    """
-    Detect and execute direct filesystem actions: create/delete/rename folder or file.
-    Returns a response dict on success/failure, or None if no action detected.
-    """
-    import re as _re
-    import os as _os
-
-    lower = query.lower()
-
-    # ── CREATE FOLDER ──────────────────────────────────────────────────────────
-    is_create_folder = bool(_re.search(
-        r'\b(create|make|mkdir|new)\s+(a\s+)?(folder|directory|dir)\b', lower
-    ))
-    if is_create_folder:
-        target_path = _extract_path_from_query(query)
-        if not target_path:
-            # Try to extract folder name after "named/called"
-            name_match = _re.search(r'(?:named?|called?)\s+["\']?([^\s"\']+)["\']?', lower)
-            folder_name = name_match.group(1) if name_match else None
-            if folder_name:
-                target_path = _os.path.join(_os.path.expanduser("~"), "Documents", folder_name)
-        if not target_path:
-            return {
-                "role": "assistant",
-                "content": "⚠️ I couldn't determine the folder path. Please specify the full path, e.g.:\n`create a folder at C:\\Users\\HP\\Documents\\MyFolder`",
-                "intent": Intent.FILE_OPERATION.value,
-                "status": "error",
-                "steps": ["Path Extraction Failed"],
-            }
-        try:
-            already_exists = _os.path.exists(target_path)
-            if already_exists:
-                return {
-                    "role": "assistant",
-                    "content": f"ℹ️ **Folder already exists:**\n`{target_path}`\n\nNo action needed.",
-                    "intent": Intent.FILE_OPERATION.value,
-                    "status": "success",
-                    "steps": ["Path Verified", "Folder Already Exists"],
-                }
-            _os.makedirs(target_path, exist_ok=True)
-            if _os.path.isdir(target_path):
-                folder_name = _os.path.basename(target_path)
-                return {
-                    "role": "assistant",
-                    "content": (
-                        f"✅ **Folder Created Successfully!**\n\n"
-                        f"| Property | Value |\n"
-                        f"| :--- | :--- |\n"
-                        f"| **Folder Name** | `{folder_name}` |\n"
-                        f"| **Full Path** | `{target_path}` |\n"
-                        f"| **Status** | ✅ Created & Verified |\n\n"
-                        f"> 🔒 **Vault Policy:** Folder created with your user permissions."
-                    ),
-                    "intent": Intent.FILE_OPERATION.value,
-                    "status": "success",
-                    "steps": ["Path Validated", "Folder Created", "Creation Verified"],
-                }
-            else:
-                return {
-                    "role": "assistant",
-                    "content": f"⚠️ Folder creation attempted but could not be verified at `{target_path}`. Check permissions.",
-                    "intent": Intent.FILE_OPERATION.value,
-                    "status": "error",
-                    "steps": ["Creation Attempted", "Verification Failed"],
-                }
-        except PermissionError:
-            return {
-                "role": "assistant",
-                "content": f"❌ **Permission Denied:** Cannot create folder at `{target_path}`.\n\nTry a path you own, like `C:\\Users\\HP\\Documents\\` or your Desktop.",
-                "intent": Intent.FILE_OPERATION.value,
-                "status": "error",
-                "steps": ["Permission Check Failed"],
-            }
-        except Exception as exc:
-            return {
-                "role": "assistant",
-                "content": f"❌ **Error creating folder:** `{exc}`",
-                "intent": Intent.FILE_OPERATION.value,
-                "status": "error",
-                "steps": ["Folder Creation Failed"],
-            }
-
-    # ── CREATE FILE ────────────────────────────────────────────────────────────
-    is_create_file = bool(_re.search(r'\b(create|make|new)\s+(a\s+)?file\b', lower))
-    if is_create_file:
-        target_path = _extract_path_from_query(query)
-        if not target_path:
-            name_match = _re.search(r'(?:named?|called?)\s+["\']?([^\s"\']+)["\']?', lower)
-            file_name = name_match.group(1) if name_match else "new_file.txt"
-            target_path = _os.path.join(_os.path.expanduser("~"), "Documents", file_name)
-        try:
-            _os.makedirs(_os.path.dirname(target_path), exist_ok=True)
-            with open(target_path, "a", encoding="utf-8"):
-                pass
-            fname = _os.path.basename(target_path)
-            return {
-                "role": "assistant",
-                "content": (
-                    f"✅ **File Created Successfully!**\n\n"
-                    f"| Property | Value |\n"
-                    f"| :--- | :--- |\n"
-                    f"| **File Name** | `{fname}` |\n"
-                    f"| **Full Path** | `{target_path}` |\n"
-                    f"| **Status** | ✅ Created & Verified |\n\n"
-                    f"> 🔒 **Vault Policy:** File created with your user permissions."
-                ),
-                "intent": Intent.FILE_OPERATION.value,
-                "status": "success",
-                "steps": ["Path Validated", "File Created", "Creation Verified"],
-            }
-        except Exception as exc:
-            return {
-                "role": "assistant",
-                "content": f"❌ **Error creating file:** `{exc}`",
-                "intent": Intent.FILE_OPERATION.value,
-                "status": "error",
-                "steps": ["File Creation Failed"],
-            }
-
-    # ── DELETE FOLDER/FILE ─────────────────────────────────────────────────────
-    is_delete = bool(_re.search(r'\b(delete|remove)\b', lower))
-    if is_delete:
-        target_path = _extract_path_from_query(query)
-        if not target_path:
-            return {
-                "role": "assistant",
-                "content": "⚠️ Please provide the full path to the file or folder you want to delete.",
-                "intent": Intent.FILE_OPERATION.value,
-                "status": "error",
-                "steps": ["Path Extraction Failed"],
-            }
-        import shutil as _shutil
-        try:
-            if _os.path.isdir(target_path):
-                _shutil.rmtree(target_path)
-                return {
-                    "role": "assistant",
-                    "content": f"✅ **Folder deleted:** `{target_path}`",
-                    "intent": Intent.FILE_OPERATION.value,
-                    "status": "success",
-                    "steps": ["Path Verified", "Folder Deleted"],
-                }
-            elif _os.path.isfile(target_path):
-                _os.remove(target_path)
-                return {
-                    "role": "assistant",
-                    "content": f"✅ **File deleted:** `{target_path}`",
-                    "intent": Intent.FILE_OPERATION.value,
-                    "status": "success",
-                    "steps": ["Path Verified", "File Deleted"],
-                }
-            else:
-                return {
-                    "role": "assistant",
-                    "content": f"⚠️ Path not found: `{target_path}`",
-                    "intent": Intent.FILE_OPERATION.value,
-                    "status": "error",
-                    "steps": ["Path Not Found"],
-                }
-        except Exception as exc:
-            return {
-                "role": "assistant",
-                "content": f"❌ **Error deleting:** `{exc}`",
-                "intent": Intent.FILE_OPERATION.value,
-                "status": "error",
-                "steps": ["Deletion Failed"],
-            }
-
-    return None  # No direct FS action detected
+def _PLACEHOLDER(): pass  # (old helpers removed — now in core.file_manager.operations)
 
 
 def file_node(state: AgentState) -> AgentState:
-    """Handle file-operation intents — direct FS actions first, then VaultAIAgent scan."""
+    """Handle ALL file-operation intents via the FileOperationEngine.
+
+    Priority:
+      1. core.file_manager.operations.execute_file_query()
+         → handles create/delete/move/copy/rename/list/search/open
+      2. VaultAIAgent fallback
+         → handles organize/duplicate/AI-categorize scan queries
+    """
+    from core.file_manager.operations import execute_file_query  # noqa: PLC0415
+
     user_query = state["user_query"]
     session_id = state.get("session_id", "default")
     intent = state.get("intent", Intent.FILE_OPERATION.value)
     pending_actions = _get_pending_actions()
 
-    # ── 1. Try direct filesystem action first ──────────────────────────────────
-    fs_result = _handle_fs_action(user_query)
+    # ── 1. Try the full file operation engine ─────────────────────────────────
+    fs_result = execute_file_query(user_query)
     if fs_result is not None:
         return {"response": fs_result}
 
-    # ── 2. Fall back to VaultAIAgent for scan/list/organize/duplicate ──────────
+    # ── 2. VaultAIAgent — scan / organize / duplicate detection ───────────────
     from core.ai.agent import VaultAIAgent  # noqa: PLC0415
 
     agent = VaultAIAgent()
@@ -356,13 +175,11 @@ def file_node(state: AgentState) -> AgentState:
     matched_files = result.get("matched_files", [])
 
     md_sections: List[str] = []
-
     if ai_text:
         md_sections.append(ai_text)
 
     user_asked_duplicates = any(
-        w in user_query.lower()
-        for w in ["duplicate", "duplicates", "wasted", "copies", "copy"]
+        w in user_query.lower() for w in ["duplicate", "duplicates", "wasted", "copies", "copy"]
     )
     if duplicates and user_asked_duplicates:
         md_sections.append("### 🔁 **Duplicate Files Breakdown:**\n")
@@ -374,8 +191,7 @@ def file_node(state: AgentState) -> AgentState:
             )
 
     user_asked_organize = any(
-        w in user_query.lower()
-        for w in ["organize", "sort", "categorize", "cleanup", "clean up", "suggest"]
+        w in user_query.lower() for w in ["organize", "sort", "categorize", "cleanup", "clean up", "suggest"]
     )
     if suggestions and user_asked_organize:
         md_sections.append("### 💡 **Suggested Organization Plan:**\n")
@@ -397,23 +213,27 @@ def file_node(state: AgentState) -> AgentState:
         md_sections.append("| File Name | Category | Size | Path |")
         md_sections.append("| :--- | :--- | :--- | :--- |")
         for f in matched_files[:10]:
-            name = f.get("name", "")
-            cat = f.get("category", "")
-            size = f.get("human_size", "")
-            path = f.get("path", "")
-            md_sections.append(f"| `{name}` | **{cat}** | {size} | `{path}` |")
+            md_sections.append(
+                f"| `{f.get('name','')}` | **{f.get('category','')}** | "
+                f"{f.get('human_size','')} | `{f.get('path','')}` |"
+            )
 
     if not md_sections:
-        md_sections.append("I couldn't find any matching files or actions to perform. Try being more specific, e.g. `create a folder at C:\\Users\\HP\\Documents\\MyFolder`.")
+        md_sections.append(
+            "I couldn't determine the file action. Try:\n"
+            "- `create a folder named Projects on Desktop`\n"
+            "- `move C:\\Users\\HP\\Desktop\\notes.txt to Documents`\n"
+            "- `list files in Downloads`\n"
+            "- `search for *.pdf on Desktop`"
+        )
 
-    final_content = "\n\n".join(md_sections)
     return {
         "response": {
             "role": "assistant",
-            "content": final_content,
+            "content": "\n\n".join(md_sections),
             "intent": intent,
             "status": "success",
-            "steps": ["Scanned Authorized Folders", "Detected Duplicates & Clusters", "Reasoned with Qwen3"],
+            "steps": ["File Operation Engine", "Executed Action"],
         }
     }
 
