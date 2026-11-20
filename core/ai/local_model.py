@@ -41,7 +41,7 @@ Capabilities routed by Vault AI's engine:
 - Multi-step task planning → you assist, tools execute
 
 Rules — follow strictly:
-- Be concise: at most 150 words unless the user asks for more.
+- Be concise for general questions (under 150 words), but provide comprehensive, step-by-step details when the user asks for planning, analysis, code, or structured tasks.
 - Never bypass or weaken Vault AI's security or permission layer."""
 
 
