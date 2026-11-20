@@ -31,23 +31,33 @@ _SYSTEM_PATTERNS = [
     r"\b(check (system|hardware|specs|performance))\b",
 ]
 
+_COMPLEX_PATTERNS = [
+    r"\b(plan|create a plan|make a plan|step[- ]by[- ]step|roadmap|architecture|workflow|design|multi-step|develop|setup|install|configure|build|deploy|environment)\b",
+]
+
+# Actions that directly manipulate the filesystem — always FILE_OPERATION
+_FILE_ACTION_PATTERNS = [
+    r"\b(create|make|mkdir|new)\s+(a\s+)?(folder|directory|dir|file)\b",
+    r"\b(create|make|new)\s+(folder|directory|dir|file)\s+(at|in|to|named?|called?)\b",
+    r"\b(folder|directory)\s+(to|at|in|path)\b",
+    r"\b(delete|remove|rename|move|copy)\s+(the\s+)?(folder|directory|file|files)\b",
+    r"\bdelete\s+file\b",
+    r"\bmove\s+files?\b",
+]
+
 _FILE_PATTERNS = [
-    r"\b(file|files|folder|folders|directory|directories|dir)\b",
     r"\b(duplicate|duplicates|wasted space)\b",
     r"\b(organize|organization|cleanup|clean up|sort|categorize)\b",
-    r"\b(which file|which files|list files|show files|find files|search files)\b",
-    r"\b(pdf|docx?|xlsx?|txt|png|jpe?g|archive|zip)\b",
-    r"\b(downloads?|documents?|pictures?)\b",
+    r"\b(list|show|find|search|scan|display|which|where)\s+.*?\b(file|files|folder|folders|directory|directories|dir)\b",
+    r"\b(which file|which files|list files|show files|find files|search files|scan files)\b",
+    r"\b(delete|remove|move|copy|rename)\s+.*?\b(file|files|folder|folders)\b",
+    r"\b(file|files|folder|folders|directory|directories|dir)\b",
 ]
 
 _CASUAL_PATTERNS = [
     r"^(hi|hello|hey|hlo|heya|hola|howdy|yo|sup|greetings|good morning|good evening|good afternoon)\b",
     r"\b(who are you|what are you|what can you do|help me|introduce yourself)\b",
     r"^(thanks|thank you|cool|awesome|great)\b",
-]
-
-_COMPLEX_PATTERNS = [
-    r"\b(setup|install|configure|plan|build|deploy|multi-step|develop|environment)\b",
 ]
 
 
@@ -77,14 +87,22 @@ def classify_intent(text: str) -> Intent:
         if re.search(pattern, query):
             return Intent.SYSTEM_STATUS
 
-    # 4. File Operations (only when file-specific keywords are used)
-    for pattern in _FILE_PATTERNS:
+    # 4a. Direct filesystem actions — always FILE_OPERATION (before complex check)
+    for pattern in _FILE_ACTION_PATTERNS:
         if re.search(pattern, query):
             return Intent.FILE_OPERATION
 
-    # 5. Complex Multi-Step Planning
+    # 4b. Complex Multi-Step Planning (e.g. "plan to build ...", "step-by-step ...")
     for pattern in _COMPLEX_PATTERNS:
         if re.search(pattern, query):
+            # If the user specifically asks to organize/clean up files on disk, prefer file operation
+            if any(re.search(fp, query) for fp in [r"\b(duplicate|duplicates)\b", r"\b(organize|cleanup|clean up|sort)\b"]):
+                return Intent.FILE_OPERATION
             return Intent.COMPLEX_TASK
+
+    # 5. General File Operations (listing, scanning, etc.)
+    for pattern in _FILE_PATTERNS:
+        if re.search(pattern, query):
+            return Intent.FILE_OPERATION
 
     return Intent.GENERAL_QUERY
