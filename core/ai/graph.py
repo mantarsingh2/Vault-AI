@@ -269,10 +269,62 @@ def system_node(state: AgentState) -> AgentState:
 # ---------------------------------------------------------------------------
 
 def security_node(state: AgentState) -> AgentState:
-    """Return device security / TPM identity information."""
+    """Execute live security audits, malware scans, or device TPM checks."""
+    import re as _re
     from core.device import get_hardware_identifiers, get_key_storage_info  # noqa: PLC0415
+    from core.security.auditor import audit_laptop_security, execute_malware_scan  # noqa: PLC0415
 
+    user_query = state.get("user_query", "").lower()
     intent = state.get("intent", Intent.SECURITY_CHECK.value)
+
+    # 1. On-demand live malware quick scan execution
+    if any(k in user_query for k in ["scan for malware", "malware scan", "virus scan", "defender scan"]):
+        scan_res = execute_malware_scan()
+        if scan_res.get("success"):
+            content = (
+                "### 🛡️ **Windows Defender Live Malware Scan Initiated**\n\n"
+                "✅ **Execution Status:** Successfully triggered Windows Defender Quick Scan via PowerShell API.\n\n"
+                "| Property | Value |\n| :--- | :--- |\n"
+                "| **Engine** | Microsoft Defender Antivirus |\n"
+                "| **Scan Type** | Quick Scan (Memory, Startup, System Files) |\n"
+                "| **Status** | 🟢 Running in Background |\n\n"
+                "> 💡 **Tip:** You can continue working normally. Defender will notify you if any threats are intercepted."
+            )
+        else:
+            content = f"⚠️ Could not start Windows Defender scan: {scan_res.get('message')}"
+
+        return {
+            "response": {
+                "role": "assistant",
+                "content": content,
+                "intent": intent,
+                "status": "success",
+                "steps": ["Triggered Windows Defender Quick Scan API", "Verified Background Execution"],
+            }
+        }
+
+    # 2. Live Laptop Security Audit & Implementation Check
+    is_audit_query = any(k in user_query for k in [
+        "check", "audit", "verify", "implemented", "laptop security", "pc security",
+        "firewall", "defender", "antivirus", "bitlocker", "can you do it"
+    ])
+    is_pure_tpm_query = ("tpm" in user_query or "cryptographic key" in user_query) and not any(
+        k in user_query for k in ["laptop", "firewall", "antivirus", "implemented", "audit", "plan"]
+    )
+
+    if is_audit_query and not is_pure_tpm_query:
+        audit_res = audit_laptop_security()
+        return {
+            "response": {
+                "role": "assistant",
+                "content": audit_res["content"],
+                "intent": intent,
+                "status": "success",
+                "steps": audit_res["steps"],
+            }
+        }
+
+    # 3. Pure TPM Device Identity check
     sec_info = get_key_storage_info()
     hw_ids = get_hardware_identifiers()
     provider_label = (

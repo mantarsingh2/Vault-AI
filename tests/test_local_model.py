@@ -100,7 +100,7 @@ class LocalModelTests(unittest.TestCase):
         )
         self.assertEqual(result["intent"], Intent.GENERAL_QUERY.value)
         self.assertEqual(result["content"], "Qwen3 generated answer.")
-        self.assertEqual(result["steps"], ["Routed to Local Qwen3 4B", "Inference Completed"])
+        self.assertEqual(result["steps"], ["Routed to Local Qwen3 8B", "Inference Completed"])
         chat.assert_called_once()
         self.assertEqual(chat.call_args.args[0][0]["content"], "Earlier question")
         self.assertEqual(

@@ -26,6 +26,11 @@ _CONFIRM_PATTERNS = [
 
 _SECURITY_PATTERNS = [
     r"\b(tpm|device security|cryptographic key|device key|security status|device identity|fingerprint)\b",
+    r"\b(audit|verify|check|inspect|test|implement)\b.*?\b(security|antivirus|defender|firewall|bitlocker|encryption|protection)\b",
+    r"\b(can you do it and check|check (it )?w(h)?ether it (is )?already implemented|is security (implemented|enabled|active))\b",
+    r"\b(scan\s+(for\s+)?(malware|virus|threats?)|(malware|virus|defender)\s+scan)\b",
+    r"\b(run (a )?(malware|virus|security|defender) scan|scan (my )?(laptop|pc|computer|system) for (malware|viruses))\b",
+    r"\b(check firewall|firewall status|firewall profile|antivirus status|defender status|bitlocker status)\b",
 ]
 
 _SYSTEM_PATTERNS = [
