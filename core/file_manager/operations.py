@@ -1,30 +1,25 @@
 """
-Vault AI — Complete File Operation Engine
-==========================================
+Vault AI — Secure File Operation & Query Understanding Engine
+=============================================================
 
-Handles ALL file/folder operations from natural language queries:
+Handles ALL file/folder operations from natural language queries with
+semantic query understanding, sanitization, and strict security sandboxing:
 
 Operations:
-  • create   — create folder or file
-  • delete   — delete folder or file (to Recycle Bin on Windows)
+  • create   — create folder or file (sanitized, authorized workspaces only)
+  • delete   — delete folder or file (Recycle Bin with safety protections)
   • move     — move/cut-paste folder or file
   • copy     — copy-paste folder or file
   • rename   — rename folder or file
-  • list     — list contents of a directory
+  • list     — list contents of an authorized directory
   • search   — search files by name or extension
   • open     — open file/folder in Explorer
 
-Tech stack used:
-  • os / shutil / pathlib  — stdlib filesystem operations
-  • winreg                 — Windows registry for known folders
-  • subprocess             — Windows Recycle Bin via PowerShell, Explorer open
-  • Qwen3 (Ollama)         — NLP parsing of ambiguous queries → structured JSON
-
-Security:
-  • SecurityManager from core.file_manager.security enforces authorized roots
-  • No symlink traversal, no path traversal (..), no system directory access
-  • User home and all standard user folders (Desktop, Documents, Downloads,
-    Pictures, Music, Videos) are always authorized
+Security Hardening:
+  • Sensitive system paths (AppData, Cookies, Local Settings, .ssh, etc.) are strictly BLOCKED
+  • Root user profile directory (C:\\Users\\HP) cannot be modified or deleted directly
+  • Traversal attacks (.. / symlink breakouts) are strictly prevented
+  • Erroneous or malicious paths are blocked before execution
 """
 
 from __future__ import annotations
@@ -42,49 +37,89 @@ from core.file_manager.security import SecurityManager
 from core.file_manager.scanner import FileScanner, get_file_category, EXTENSION_CATEGORIES
 
 # ---------------------------------------------------------------------------
-# Security: expanded authorized roots (all standard user folders)
+# Security: Protected / Dangerous System Directories (Blacklist)
+# ---------------------------------------------------------------------------
+
+PROTECTED_SYSTEM_DIRS = {
+    "appdata",
+    "application data",
+    "cookies",
+    "local settings",
+    "nethood",
+    "printhood",
+    "recent",
+    "sendto",
+    "start menu",
+    "templates",
+    ".ssh",
+    ".aws",
+    ".azure",
+    ".kube",
+    ".gnupg",
+    ".git",
+    "system volume information",
+    "$recycle.bin",
+    "windows",
+    "program files",
+    "program files (x86)",
+    "programdata",
+    "system32",
+    "syswow64",
+}
+
+
+def _is_safe_target(path: Path) -> Tuple[bool, str]:
+    """Validate that the target path does not touch sensitive system or OS files."""
+    try:
+        resolved = path.resolve()
+        parts_lower = [p.lower() for p in resolved.parts]
+
+        # Block root drives or whole user profile modifications
+        if resolved == Path.home() or len(resolved.parts) <= 2:
+            return False, "Direct modifications to system or user profile root are restricted."
+
+        # Check blacklisted directory names
+        for part in parts_lower:
+            if part in PROTECTED_SYSTEM_DIRS or part.startswith("ntuser.dat"):
+                return False, f"Access to protected system location '{part}' is restricted."
+
+        return True, "Safe"
+    except Exception as e:
+        return False, f"Path validation error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Security: Authorized Roots
 # ---------------------------------------------------------------------------
 
 def _build_security_manager() -> SecurityManager:
-    """Build a SecurityManager with all standard user folders authorized."""
+    """Build a SecurityManager with strictly authorized user workspace folders."""
     sm = SecurityManager()
     home = Path.home()
-    # Add all common user folders
-    extra = [
-        home,
+    
+    # Authorized user workspaces ONLY (never the raw root home containing AppData/Cookies)
+    workspaces = [
         home / "Desktop",
         home / "Documents",
         home / "Downloads",
         home / "Pictures",
         home / "Music",
         home / "Videos",
-        home / "OneDrive",
     ]
-    # Also try Windows registry known folders
-    try:
-        import winreg
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
-        )
-        for reg_name in [
-            "Desktop", "Personal", "My Pictures", "My Music", "My Video",
-            "{374DE290-123F-4565-9164-39C4925E467B}"  # Downloads
-        ]:
-            try:
-                val, _ = winreg.QueryValueEx(key, reg_name)
-                extra.append(Path(os.path.expandvars(val)))
-            except FileNotFoundError:
-                pass
-        winreg.CloseKey(key)
-    except Exception:
-        pass
-    for p in extra:
+    
+    onedrive = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer")
+    if onedrive:
+        od = Path(onedrive)
+        for w in ["Desktop", "Documents", "Downloads", "Pictures"]:
+            workspaces.append(od / w)
+
+    for p in workspaces:
         try:
-            if p.exists():
-                sm.add_authorized_root(str(p))
+            if p.exists() and p.is_dir():
+                sm.add_authorized_root(str(p.resolve()))
         except Exception:
             pass
+
     return sm
 
 
@@ -133,39 +168,85 @@ class FileOpResult:
 
 
 # ---------------------------------------------------------------------------
-# Path utilities
+# Path aliases & Name Sanitization
 # ---------------------------------------------------------------------------
 
-# Common aliases → real paths
 _PATH_ALIASES = {
-    "desktop":   str(Path.home() / "Desktop"),
-    "documents": str(Path.home() / "Documents"),
-    "docs":      str(Path.home() / "Documents"),
-    "downloads": str(Path.home() / "Downloads"),
-    "pictures":  str(Path.home() / "Pictures"),
-    "photos":    str(Path.home() / "Pictures"),
-    "music":     str(Path.home() / "Music"),
-    "videos":    str(Path.home() / "Videos"),
-    "home":      str(Path.home()),
-    "~":         str(Path.home()),
+    # Desktop
+    "desktop folder": str(Path.home() / "Desktop"),
+    "desktop":        str(Path.home() / "Desktop"),
+    
+    # Downloads (both singular and plural)
+    "download folder":  str(Path.home() / "Downloads"),
+    "downloads folder": str(Path.home() / "Downloads"),
+    "download directory": str(Path.home() / "Downloads"),
+    "downloads directory": str(Path.home() / "Downloads"),
+    "download":         str(Path.home() / "Downloads"),
+    "downloads":        str(Path.home() / "Downloads"),
+
+    # Documents
+    "document folder":  str(Path.home() / "Documents"),
+    "documents folder": str(Path.home() / "Documents"),
+    "document directory": str(Path.home() / "Documents"),
+    "documents directory": str(Path.home() / "Documents"),
+    "document":         str(Path.home() / "Documents"),
+    "documents":        str(Path.home() / "Documents"),
+    "doc":              str(Path.home() / "Documents"),
+    "docs":             str(Path.home() / "Documents"),
+
+    # Pictures
+    "picture folder":  str(Path.home() / "Pictures"),
+    "pictures folder": str(Path.home() / "Pictures"),
+    "picture":         str(Path.home() / "Pictures"),
+    "pictures":        str(Path.home() / "Pictures"),
+    "photos":          str(Path.home() / "Pictures"),
+    "photo":           str(Path.home() / "Pictures"),
+
+    # Music & Videos
+    "music folder":    str(Path.home() / "Music"),
+    "music":           str(Path.home() / "Music"),
+    "video folder":    str(Path.home() / "Videos"),
+    "videos folder":   str(Path.home() / "Videos"),
+    "videos":          str(Path.home() / "Videos"),
+    "video":           str(Path.home() / "Videos"),
 }
+
+
+def _sanitize_name(name: str) -> str:
+    """Sanitize folder or file name by stripping conversational noise, trailing prepositions, and invalid characters."""
+    if not name:
+        return ""
+    # Strip trailing clauses, prepositions (e.g. ' in C:\\...', ' on Desktop'), and conversational noise
+    cleaned = re.split(
+        r'[,;]|\s+\b(?:in|inside|at|on|to|into|from|first|then|please|can\s+you|and|also|make|do|with|named?|called?|understand)\b',
+        name,
+        flags=re.IGNORECASE
+    )[0]
+    # Remove invalid Windows filename characters: \ / : * ? " < > |
+    cleaned = re.sub(r'[\\/:*?"<>|]', '', cleaned).strip().strip(".'\"")
+    return cleaned
 
 
 def _resolve_alias(text: str) -> str:
     """Replace path aliases with real paths safely without invalid regex escapes."""
     lower = text.lower().strip()
+    # Check exact match
     if lower in _PATH_ALIASES:
         return _PATH_ALIASES[lower]
-    # Standalone alias replacements (e.g. "on desktop", "in documents")
-    for alias, real in _PATH_ALIASES.items():
-        # Match only when alias is preceded by a preposition or start of string, and not inside a path
-        pattern = rf'(?<![A-Za-z0-9_\\/])(?:on|in|at|to|from|the)\s+{re.escape(alias)}(?![A-Za-z0-9_\\/])'
-        text = re.sub(
-            pattern,
-            lambda _: f' {real}',
-            text,
-            flags=re.IGNORECASE,
-        )
+
+    # Sort aliases by descending length so multi-word variants match first
+    sorted_aliases = sorted(_PATH_ALIASES.items(), key=lambda kv: len(kv[0]), reverse=True)
+    for alias, real in sorted_aliases:
+        pattern = rf'(?<![A-Za-z0-9_\\/])(?:of|in|at|to|from|on|the)?\s*\b{re.escape(alias)}\b(?![A-Za-z0-9_\\/])'
+        if re.search(pattern, text, re.IGNORECASE):
+            text = re.sub(
+                pattern,
+                lambda _: f' {real}',
+                text,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            break
     return text
 
 
@@ -173,12 +254,11 @@ def _extract_windows_paths(text: str) -> List[str]:
     """Extract all Windows absolute paths from text safely, supporting spaces and quotes."""
     paths: List[str] = []
     
-    # 1. First extract quoted Windows paths: "C:\..." or 'C:\...'
+    # 1. Quoted paths
     quoted = re.findall(r'["\']([A-Za-z]:[/\\][^"\']+)["\']', text)
     paths.extend([p.strip().rstrip("\\/ .,") for p in quoted if p.strip()])
 
-    # 2. Extract unquoted Windows paths, being careful around keywords like 'to', 'into', 'as'
-    # Match drive letter through end of path tokens
+    # 2. Unquoted paths
     unquoted = re.findall(
         r'(?<![A-Za-z0-9_])([A-Za-z]:[/\\](?:[^\n\r\t,"\'*?<>|]+?))(?=\s+(?:to|into|as|from|in|at|named?|called?)\s+[A-Za-z]:[/\\]|\s+(?:to|into|as)\b|\s*$|[,"\'\n\r])',
         text,
@@ -206,10 +286,9 @@ def _human_size(size_bytes: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# NLP parser — regex-based (fast, no Ollama required)
+# NLP Parser & Query Understanding (Qwen3 / Regex)
 # ---------------------------------------------------------------------------
 
-# Operation keyword maps
 _OP_PATTERNS = {
     "create_folder": [
         r"\b(create|make|mkdir|new|add)\s+(a\s+)?(new\s+)?(folder|directory|dir)\b",
@@ -237,7 +316,7 @@ _OP_PATTERNS = {
     ],
     "list": [
         r"\b(list|show|display|ls|dir|what('?s|\s+is)\s+(in|inside))\b",
-        r"\b(contents?|files?\s+in|folders?\s+in)\b",
+        r"\b(contents?|files?\s+in|folders?\s+in|files?\s+of)\b",
     ],
     "search": [
         r"\b(search|find|look\s+for|locate|where\s+(is|are))\b",
@@ -248,10 +327,10 @@ _OP_PATTERNS = {
     ],
 }
 
+
 def _detect_operation(text: str) -> Optional[str]:
     """Detect operation type from query text."""
     lower = text.lower()
-    # Priority order
     for op in ["create_folder", "create_file", "delete", "rename", "move", "copy", "list", "search", "open"]:
         for pat in _OP_PATTERNS[op]:
             if re.search(pat, lower):
@@ -259,35 +338,99 @@ def _detect_operation(text: str) -> Optional[str]:
     return None
 
 
-def _parse_name_from_query(text: str, after_keywords: List[str]) -> Optional[str]:
-    """Extract a name after keywords like 'named', 'called', 'as'."""
-    for kw in after_keywords:
-        m = re.search(
-            rf'\b{re.escape(kw)}\s+["\']?([^\s"\'\\/:*?<>|]+(?:\s+[^\s"\'\\/:*?<>|]+)*?)["\']?'
-            rf'(?:\s+(?:to|in|at|on|from|into)|$)',
-            text, re.IGNORECASE
+def parse_with_llm(query: str) -> Optional[FileOpRequest]:
+    """
+    Use local Qwen3 LLM to semantically understand user query,
+    separating conversational phrasing from actual parameters.
+    """
+    try:
+        from core.ai.local_model import local_model
+        if not local_model.is_available():
+            return None
+
+        prompt = (
+            "You are a local filesystem assistant in Vault AI. Understand the user's intent and parameters.\n"
+            "Output ONLY valid JSON with no preamble or explanation:\n"
+            "{\n"
+            '  "operation": "create_folder" | "create_file" | "delete" | "move" | "copy" | "rename" | "list" | "search" | "open" | "unknown",\n'
+            '  "target_name": "clean folder or file name with NO conversational noise" or null,\n'
+            '  "location": "Desktop" | "Documents" | "Downloads" | "Pictures" | "Music" | "Videos" | null or full path,\n'
+            '  "destination": "destination folder or path" or null,\n'
+            '  "pattern": "search pattern like *.pdf" or null\n'
+            "}\n\n"
+            "Example: 'create a folder on desktop named rakshit , first understand my query then make it'\n"
+            'Output: {"operation": "create_folder", "target_name": "rakshit", "location": "Desktop", "destination": null, "pattern": null}\n\n'
+            "Example: 'list file of download folder'\n"
+            'Output: {"operation": "list", "target_name": null, "location": "Downloads", "destination": null, "pattern": null}\n\n'
+            f"User query: {query}\n"
+            "JSON output:"
         )
-        if m:
-            return m.group(1).strip()
-    # Also try quoted
-    quoted = _extract_quoted(text)
-    if quoted:
-        return quoted[0]
-    return None
+        response = local_model.chat([{"role": "user", "content": prompt}])
+        if not response:
+            return None
+
+        match = re.search(r'\{.*?\}', response, re.DOTALL)
+        if not match:
+            return None
+
+        data = json.loads(match.group(0))
+        op = data.get("operation", "unknown")
+        name = _sanitize_name(data.get("target_name") or "")
+        loc = data.get("location") or ""
+        dest = data.get("destination") or ""
+        pat = data.get("pattern")
+
+        # Resolve location alias
+        source_path = None
+        if loc:
+            loc_resolved = _resolve_alias(loc).strip()
+            if loc_resolved in _PATH_ALIASES.values():
+                source_path = loc_resolved
+            elif os.path.exists(loc_resolved):
+                source_path = loc_resolved
+            elif (Path.home() / loc).exists():
+                source_path = str(Path.home() / loc)
+
+        if op in {"create_folder", "create_file"} and name:
+            parent = source_path or str(Path.home() / "Documents")
+            source_path = str(Path(parent) / name)
+
+        req = FileOpRequest(
+            operation=op,
+            source=source_path,
+            destination=_resolve_alias(dest) if dest else None,
+            name=name or None,
+            pattern=pat,
+            raw_query=query,
+        )
+        return req
+    except Exception:
+        return None
 
 
 def parse_file_operation(query: str) -> FileOpRequest:
     """
-    Parse a natural language file operation query into a FileOpRequest.
-    Uses regex heuristics — fast, no Ollama needed.
-    Falls back to Qwen3 JSON parsing for complex/ambiguous queries.
+    Parse natural language query into FileOpRequest.
+    Prioritizes deep semantic understanding for conversational queries.
     """
-    # Resolve aliases first
-    resolved = _resolve_alias(query)
-    lower = resolved.lower()
+    lower = query.lower().strip()
 
-    op = _detect_operation(lower)
+    # If conversational punctuation or phrases exist, attempt LLM understanding first
+    is_conversational = any(m in lower for m in [",", ";", "first understand", "please", "can you", "then make", "i want"])
+    if is_conversational:
+        llm_req = parse_with_llm(query)
+        if llm_req and llm_req.operation != "unknown":
+            return llm_req
+
+    resolved = _resolve_alias(query)
+    lower_resolved = resolved.lower()
+
+    op = _detect_operation(lower_resolved)
     if op is None:
+        # Fall back to LLM
+        llm_req = parse_with_llm(query)
+        if llm_req:
+            return llm_req
         return FileOpRequest(operation="unknown", raw_query=query)
 
     paths = _extract_windows_paths(resolved)
@@ -297,27 +440,29 @@ def parse_file_operation(query: str) -> FileOpRequest:
 
     # ── CREATE FOLDER ──────────────────────────────────────────────────────────
     if op == "create_folder":
-        name = _parse_name_from_query(resolved, ["named", "called", "as", "mkdir"])
-        if not name:
+        raw_name = ""
+        # Search after named/called/as
+        name_m = re.search(r'\b(?:named?|called?|as)\s+["\']?([^"\'\n\r]+?)(?=\s+(?:in|inside|at|on|to|into|from)\b|\s*$|[,"\'\n\r])', resolved, re.IGNORECASE)
+        if name_m:
+            raw_name = name_m.group(1).strip()
+        elif quoted:
+            raw_name = quoted[0].strip()
+        else:
             m = re.search(
-                r'\b(?:create|make|mkdir|new|add)\s+(?:a\s+)?(?:new\s+)?(?:folder|directory|dir)\s+'
-                r'(?:named?\s+|called?\s+)?["\']?([A-Za-z0-9_ .()\[\]-]+)["\']?',
+                r'\b(?:create|make|mkdir|new|add)\s+(?:a\s+)?(?:new\s+)?(?:folder|directory|dir)\s+["\']?([^"\'\n\r]+?)(?=\s+(?:in|inside|at|on|to|into|from)\b|\s*$|[,"\'\n\r])',
                 resolved, re.IGNORECASE
             )
             if m:
-                cand = m.group(1).strip()
-                if cand.lower() not in {"in", "at", "to", "on", "the", "a"}:
-                    name = cand
+                raw_name = m.group(1).strip()
+
+        name = _sanitize_name(raw_name)
         if name:
             req.name = name
             if paths:
-                # paths[0] is the parent folder
                 req.source = str(Path(paths[0]) / name)
             else:
-                in_match = re.search(
-                    r'\b(?:in|inside|at|on)\s+["\']?([A-Za-z0-9_ .:\\/()\[\]-]+)["\']?',
-                    resolved, re.IGNORECASE
-                )
+                # Check target location
+                in_match = re.search(r'\b(?:in|inside|at|on)\s+["\']?([A-Za-z0-9_ .:\\/()\[\]-]+)["\']?', resolved, re.IGNORECASE)
                 parent = in_match.group(1).strip() if in_match else str(Path.home() / "Documents")
                 parent = _resolve_alias(parent)
                 req.source = str(Path(parent) / name)
@@ -327,28 +472,27 @@ def parse_file_operation(query: str) -> FileOpRequest:
 
     # ── CREATE FILE ────────────────────────────────────────────────────────────
     elif op == "create_file":
-        name = _parse_name_from_query(resolved, ["named", "called", "as", "touch"])
-        if not name and quoted:
-            name = quoted[0]
-        if not name:
+        raw_name = ""
+        name_m = re.search(r'\b(?:named?|called?|as)\s+["\']?([^"\'\n\r]+?)(?=\s+(?:in|inside|at|on|to|into|from)\b|\s*$|[,"\'\n\r])', resolved, re.IGNORECASE)
+        if name_m:
+            raw_name = name_m.group(1).strip()
+        elif quoted:
+            raw_name = quoted[0].strip()
+        else:
             m = re.search(
-                r'\b(?:create|make|new|add|touch)\s+(?:a\s+)?(?:new\s+)?file\s+'
-                r'(?:named?\s+|called?\s+)?["\']?([A-Za-z0-9_ .()\[\]-]+\.[A-Za-z0-9]+)["\']?',
+                r'\b(?:create|make|new|add|touch)\s+(?:a\s+)?(?:new\s+)?file\s+["\']?([^"\'\n\r]+?)(?=\s+(?:in|inside|at|on|to|into|from)\b|\s*$|[,"\'\n\r])',
                 resolved, re.IGNORECASE
             )
             if m:
-                cand = m.group(1).strip()
-                if cand.lower() not in {"in", "at", "to", "on", "the", "a"}:
-                    name = cand
+                raw_name = m.group(1).strip()
+
+        name = _sanitize_name(raw_name)
         if name:
             req.name = name
             if paths:
                 req.source = str(Path(paths[0]) / name)
             else:
-                in_match = re.search(
-                    r'\b(?:in|inside|at|on)\s+["\']?([A-Za-z0-9_ .:\\/()\[\]-]+)["\']?',
-                    resolved, re.IGNORECASE
-                )
+                in_match = re.search(r'\b(?:in|inside|at|on)\s+["\']?([A-Za-z0-9_ .:\\/()\[\]-]+)["\']?', resolved, re.IGNORECASE)
                 parent = in_match.group(1).strip() if in_match else str(Path.home() / "Documents")
                 parent = _resolve_alias(parent)
                 req.source = str(Path(parent) / name)
@@ -363,15 +507,13 @@ def parse_file_operation(query: str) -> FileOpRequest:
         elif quoted:
             req.source = quoted[0]
         else:
-            # "delete the folder MyFolder" / "delete file notes.txt"
             m = re.search(
-                r'\b(?:delete|remove|trash|erase|wipe|del)\s+(?:the\s+)?'
-                r'(?:folder|directory|file|dir)?\s*["\']?([^\s"\']+(?:\s+[^\s"\']+)*?)["\']?'
-                r'(?:\s+(?:in|from|on|at).*)?$',
+                r'\b(?:delete|remove|trash|erase|wipe|del)\s+(?:the\s+)?(?:folder|directory|file|dir)?\s*["\']?([^\s"\']+(?:\s+[^\s"\']+)*?)["\']?',
                 resolved, re.IGNORECASE
             )
             if m:
-                req.source = m.group(1).strip()
+                target_cand = _sanitize_name(m.group(1).strip())
+                req.source = _resolve_alias(target_cand)
 
     # ── MOVE ───────────────────────────────────────────────────────────────────
     elif op == "move":
@@ -380,16 +522,11 @@ def parse_file_operation(query: str) -> FileOpRequest:
             req.destination = paths[1]
         elif len(paths) == 1:
             req.source = paths[0]
-            # Try "to <dest>"
             to_match = re.search(r'\bto\s+["\']?([A-Za-z]:[/\\][^\s"\']+)["\']?', resolved, re.IGNORECASE)
             if to_match:
                 req.destination = to_match.group(1).strip()
         else:
-            # "move X to Y" with no Windows paths
-            m = re.search(
-                r'\b(?:move|cut|transfer|relocate|mv)\s+["\']?(.+?)["\']?\s+to\s+["\']?(.+?)["\']?$',
-                resolved, re.IGNORECASE
-            )
+            m = re.search(r'\b(?:move|cut|transfer|relocate|mv)\s+["\']?(.+?)["\']?\s+to\s+["\']?(.+?)["\']?$', resolved, re.IGNORECASE)
             if m:
                 req.source = _resolve_alias(m.group(1).strip())
                 req.destination = _resolve_alias(m.group(2).strip())
@@ -405,51 +542,43 @@ def parse_file_operation(query: str) -> FileOpRequest:
             if to_match:
                 req.destination = to_match.group(1).strip()
         else:
-            m = re.search(
-                r'\b(?:copy|cp|clone|duplicate)\s+["\']?(.+?)["\']?\s+to\s+["\']?(.+?)["\']?$',
-                resolved, re.IGNORECASE
-            )
+            m = re.search(r'\b(?:copy|cp|clone|duplicate)\s+["\']?(.+?)["\']?\s+to\s+["\']?(.+?)["\']?$', resolved, re.IGNORECASE)
             if m:
                 req.source = _resolve_alias(m.group(1).strip())
                 req.destination = _resolve_alias(m.group(2).strip())
 
     # ── RENAME ─────────────────────────────────────────────────────────────────
     elif op == "rename":
-        # "rename X to Y" or "rename X as Y"
-        m = re.search(
-            r'\b(?:rename|rn|change\s+(?:the\s+)?name)\s+(?:of\s+)?["\']?(.+?)["\']?'
-            r'\s+(?:to|as)\s+["\']?(.+?)["\']?$',
-            resolved, re.IGNORECASE
-        )
+        m = re.search(r'\b(?:rename|rn|change\s+(?:the\s+)?name)\s+(?:of\s+)?["\']?(.+?)["\']?\s+(?:to|as)\s+["\']?(.+?)["\']?$', resolved, re.IGNORECASE)
         if m:
             req.source = _resolve_alias(m.group(1).strip())
-            req.name = m.group(2).strip().strip("\"'")
+            req.name = _sanitize_name(m.group(2).strip())
         elif paths:
             req.source = paths[0]
-            new_name = _parse_name_from_query(resolved, ["to", "as", "named", "called"])
-            req.name = new_name
+            new_name_m = re.search(r'\b(?:to|as)\s+["\']?([^\s"\'\\/:*?<>|]+)["\']?', resolved, re.IGNORECASE)
+            if new_name_m:
+                req.name = _sanitize_name(new_name_m.group(1).strip())
 
     # ── LIST ───────────────────────────────────────────────────────────────────
     elif op == "list":
         if paths:
             req.source = paths[0]
         else:
-            # "list files on desktop" / "show contents of Documents"
+            # Check aliases in resolved query
             for alias in _PATH_ALIASES:
-                if alias in lower:
+                if alias in lower_resolved:
                     req.source = _PATH_ALIASES[alias]
                     break
+            # If still not found, check raw query words
             if not req.source:
-                req.source = str(Path.home())
+                for alias in _PATH_ALIASES:
+                    if alias in lower:
+                        req.source = _PATH_ALIASES[alias]
+                        break
 
     # ── SEARCH ─────────────────────────────────────────────────────────────────
     elif op == "search":
-        # "find *.pdf on desktop", "search for notes in Documents"
-        # Extract pattern
-        pattern_m = re.search(
-            r'\b(?:search|find|look\s+for|locate)\s+(?:for\s+)?["\']?([^\s"\']+(?:\.[a-z0-9]+)?)["\']?',
-            resolved, re.IGNORECASE
-        )
+        pattern_m = re.search(r'\b(?:search|find|look\s+for|locate)\s+(?:for\s+)?["\']?([^\s"\']+(?:\.[a-z0-9]+)?)["\']?', resolved, re.IGNORECASE)
         if pattern_m:
             req.pattern = pattern_m.group(1).strip()
         if paths:
@@ -459,8 +588,6 @@ def parse_file_operation(query: str) -> FileOpRequest:
                 if alias in lower:
                     req.source = _PATH_ALIASES[alias]
                     break
-            if not req.source:
-                req.source = str(Path.home())
 
     # ── OPEN ───────────────────────────────────────────────────────────────────
     elif op == "open":
@@ -471,53 +598,8 @@ def parse_file_operation(query: str) -> FileOpRequest:
                 if alias in lower:
                     req.source = _PATH_ALIASES[alias]
                     break
-            if not req.source:
-                req.source = str(Path.home())
 
     return req
-
-
-# ---------------------------------------------------------------------------
-# Qwen3-powered fallback parser (for ambiguous queries)
-# ---------------------------------------------------------------------------
-
-def parse_with_llm(query: str) -> Optional[FileOpRequest]:
-    """
-    Use Qwen3 to parse a complex/ambiguous file operation query into JSON.
-    Returns None if Ollama unavailable or parse fails.
-    """
-    try:
-        from core.ai.local_model import local_model
-        prompt = (
-            "You are a file operation parser. Parse the user's request into JSON.\n"
-            "Output ONLY valid JSON with these keys:\n"
-            "  operation: one of [create_folder, create_file, delete, move, copy, rename, list, search, open]\n"
-            "  source: source path string or null\n"
-            "  destination: destination path string or null\n"
-            "  name: new filename/foldername string or null\n"
-            "  pattern: search pattern string or null\n\n"
-            f"User request: {query}\n\n"
-            "JSON output:"
-        )
-        response = local_model.chat([{"role": "user", "content": prompt}])
-        if not response:
-            return None
-        # Extract JSON from response
-        json_match = re.search(r'\{.*?\}', response, re.DOTALL)
-        if not json_match:
-            return None
-        data = json.loads(json_match.group(0))
-        req = FileOpRequest(
-            operation=data.get("operation", "unknown"),
-            source=data.get("source"),
-            destination=data.get("destination"),
-            name=data.get("name"),
-            pattern=data.get("pattern"),
-            raw_query=query,
-        )
-        return req
-    except Exception:
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -525,10 +607,7 @@ def parse_with_llm(query: str) -> Optional[FileOpRequest]:
 # ---------------------------------------------------------------------------
 
 def _delete_to_recycle_bin(path: str) -> Tuple[bool, str]:
-    """
-    Send file/folder to Windows Recycle Bin using PowerShell.
-    Falls back to permanent deletion if shell fails.
-    """
+    """Send file/folder to Windows Recycle Bin using PowerShell."""
     try:
         result = subprocess.run(
             [
@@ -547,7 +626,6 @@ def _delete_to_recycle_bin(path: str) -> Tuple[bool, str]:
             return True, "recycled"
     except Exception:
         pass
-    # Fallback: permanent delete
     try:
         if os.path.isdir(path):
             shutil.rmtree(path)
@@ -559,7 +637,7 @@ def _delete_to_recycle_bin(path: str) -> Tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# Operation executors
+# Operation Executors with Security Enforcement
 # ---------------------------------------------------------------------------
 
 def _exec_create_folder(req: FileOpRequest) -> FileOpResult:
@@ -568,31 +646,37 @@ def _exec_create_folder(req: FileOpRequest) -> FileOpResult:
         return FileOpResult(
             success=False,
             content=(
-                "⚠️ **Please specify the folder path or name.**\n\n"
+                "⚠️ **Please specify the folder name and target workspace.**\n\n"
                 "**Examples:**\n"
-                "- `create a folder named Projects on Desktop`\n"
-                "- `create a folder at C:\\Users\\HP\\Documents\\MyProject`\n"
-                "- `make a new folder called Work in Documents`"
+                "- `create a folder named rakshit on Desktop`\n"
+                "- `make a new folder called Projects in Documents`"
             ),
             status="error",
             steps=["Path Missing"],
         )
     path = Path(req.source).resolve()
-    # Authorization check
+
+    # Security Validation
+    safe, reason = _is_safe_target(path)
+    if not safe:
+        return FileOpResult(
+            success=False,
+            content=f"🔒 **Security Violation Blocked:** {reason}",
+            status="error",
+            steps=["Security Guard Triggered"],
+        )
+
     if not sm.is_path_authorized(str(path)):
-        # Auto-authorize if it's a child of home
-        if str(path).startswith(str(Path.home())):
-            sm.add_authorized_root(str(Path.home()))
-        else:
-            return FileOpResult(
-                success=False,
-                content=(
-                    f"🔒 **Access Denied:** `{path}` is outside your authorized folders.\n\n"
-                    f"Vault AI can only access your Desktop, Documents, Downloads, Pictures, Music, Videos."
-                ),
-                status="error",
-                steps=["Authorization Failed"],
-            )
+        return FileOpResult(
+            success=False,
+            content=(
+                f"🔒 **Access Denied:** `{path}` is outside your authorized workspaces.\n\n"
+                "Vault AI can only operate within Desktop, Documents, Downloads, Pictures, Music, and Videos."
+            ),
+            status="error",
+            steps=["Authorization Failed"],
+        )
+
     if path.exists():
         return FileOpResult(
             success=True,
@@ -615,7 +699,7 @@ def _exec_create_folder(req: FileOpRequest) -> FileOpResult:
                 f"| **Location** | `{path.parent}` |\n"
                 f"| **Full Path** | `{path}` |\n"
                 f"| **Status** | ✅ Created & Verified |\n\n"
-                f"> 🔒 **Vault Policy:** Folder created with your user permissions."
+                f"> 🔒 **Vault Policy:** Folder created with verified user authorization."
             ),
             steps=["Path Validated", "Folder Created", "Creation Verified"],
         )
@@ -641,25 +725,34 @@ def _exec_create_file(req: FileOpRequest) -> FileOpResult:
         return FileOpResult(
             success=False,
             content=(
-                "⚠️ **Please specify the file name or path.**\n\n"
+                "⚠️ **Please specify the file name and target location.**\n\n"
                 "**Examples:**\n"
                 "- `create a file named notes.txt on Desktop`\n"
-                "- `create a file at C:\\Users\\HP\\Documents\\report.txt`"
+                "- `add a new file called report.txt in Documents`"
             ),
             status="error",
             steps=["Path Missing"],
         )
     path = Path(req.source).resolve()
+
+    # Security Validation
+    safe, reason = _is_safe_target(path)
+    if not safe:
+        return FileOpResult(
+            success=False,
+            content=f"🔒 **Security Violation Blocked:** {reason}",
+            status="error",
+            steps=["Security Guard Triggered"],
+        )
+
     if not sm.is_path_authorized(str(path)):
-        if str(path).startswith(str(Path.home())):
-            sm.add_authorized_root(str(Path.home()))
-        else:
-            return FileOpResult(
-                success=False,
-                content=f"🔒 **Access Denied:** `{path}` is outside your authorized folders.",
-                status="error",
-                steps=["Authorization Failed"],
-            )
+        return FileOpResult(
+            success=False,
+            content=f"🔒 **Access Denied:** `{path}` is outside your authorized workspaces.",
+            status="error",
+            steps=["Authorization Failed"],
+        )
+
     if path.exists():
         return FileOpResult(
             success=True,
@@ -702,26 +795,34 @@ def _exec_delete(req: FileOpRequest) -> FileOpResult:
         return FileOpResult(
             success=False,
             content=(
-                "⚠️ **Please specify what to delete.**\n\n"
+                "⚠️ **Please specify the file or folder to delete.**\n\n"
                 "**Examples:**\n"
-                "- `delete the folder C:\\Users\\HP\\Documents\\OldProject`\n"
-                "- `delete file C:\\Users\\HP\\Desktop\\notes.txt`\n"
-                "- `remove the file notes.txt from Desktop`"
+                "- `delete file notes.txt on Desktop`\n"
+                "- `delete the folder Projects in Documents`"
             ),
             status="error",
             steps=["Target Missing"],
         )
     path = Path(req.source).resolve()
+
+    # Security Validation
+    safe, reason = _is_safe_target(path)
+    if not safe:
+        return FileOpResult(
+            success=False,
+            content=f"🔒 **Security Violation Blocked:** {reason}",
+            status="error",
+            steps=["Security Guard Triggered"],
+        )
+
     if not sm.is_path_authorized(str(path)):
-        if str(path).startswith(str(Path.home())):
-            sm.add_authorized_root(str(Path.home()))
-        else:
-            return FileOpResult(
-                success=False,
-                content=f"🔒 **Access Denied:** `{path}` is outside your authorized folders.",
-                status="error",
-                steps=["Authorization Failed"],
-            )
+        return FileOpResult(
+            success=False,
+            content=f"🔒 **Access Denied:** `{path}` is outside your authorized workspaces.",
+            status="error",
+            steps=["Authorization Failed"],
+        )
+
     if not path.exists():
         return FileOpResult(
             success=False,
@@ -729,13 +830,12 @@ def _exec_delete(req: FileOpRequest) -> FileOpResult:
             status="error",
             steps=["Path Not Found"],
         )
+
     item_type = "Folder" if path.is_dir() else "File"
-    size = ""
-    if path.is_file():
-        size = f" ({_human_size(path.stat().st_size)})"
+    size = f" ({_human_size(path.stat().st_size)})" if path.is_file() else ""
     ok, method = _delete_to_recycle_bin(str(path))
     if ok:
-        recycle_note = "→ Sent to Recycle Bin" if method == "recycled" else "→ Permanently deleted"
+        recycle_note = "Sent to Recycle Bin" if method == "recycled" else "Deleted permanently"
         return FileOpResult(
             success=True,
             content=(
@@ -743,7 +843,7 @@ def _exec_delete(req: FileOpRequest) -> FileOpResult:
                 f"| Property | Value |\n| :--- | :--- |\n"
                 f"| **Name** | `{path.name}`{size} |\n"
                 f"| **Path** | `{path}` |\n"
-                f"| **Action** | {recycle_note} |"
+                f"| **Action** | ♻️ {recycle_note} |"
             ),
             steps=["Path Verified", f"{item_type} Deleted", recycle_note],
         )
@@ -761,25 +861,34 @@ def _exec_move(req: FileOpRequest) -> FileOpResult:
     if not req.source or not req.destination:
         return FileOpResult(
             success=False,
-            content=(
-                "⚠️ **Please specify source and destination.**\n\n"
-                "**Examples:**\n"
-                "- `move C:\\Users\\HP\\Desktop\\notes.txt to C:\\Users\\HP\\Documents`\n"
-                "- `move folder Projects from Desktop to Documents`\n"
-                "- `cut C:\\Users\\HP\\Downloads\\file.zip and paste to Desktop`"
-            ),
+            content="⚠️ **Please specify source and destination paths.**",
             status="error",
             steps=["Source or Destination Missing"],
         )
     src = Path(req.source).resolve()
     dst = Path(req.destination).resolve()
-    # If destination is a directory, move item into it
+
+    safe_src, r_src = _is_safe_target(src)
+    safe_dst, r_dst = _is_safe_target(dst)
+    if not safe_src or not safe_dst:
+        return FileOpResult(
+            success=False,
+            content=f"🔒 **Security Violation Blocked:** {r_src if not safe_src else r_dst}",
+            status="error",
+            steps=["Security Guard Triggered"],
+        )
+
     if dst.is_dir():
         dst = dst / src.name
-    if not sm.is_path_authorized(str(src)):
-        sm.add_authorized_root(str(Path.home()))
-    if not sm.is_path_authorized(str(dst)):
-        sm.add_authorized_root(str(Path.home()))
+
+    if not sm.is_path_authorized(str(src)) or not sm.is_path_authorized(str(dst)):
+        return FileOpResult(
+            success=False,
+            content="🔒 **Access Denied:** Source or destination is outside your authorized workspaces.",
+            status="error",
+            steps=["Authorization Failed"],
+        )
+
     if not src.exists():
         return FileOpResult(
             success=False,
@@ -815,21 +924,34 @@ def _exec_copy(req: FileOpRequest) -> FileOpResult:
     if not req.source or not req.destination:
         return FileOpResult(
             success=False,
-            content=(
-                "⚠️ **Please specify source and destination.**\n\n"
-                "**Examples:**\n"
-                "- `copy C:\\Users\\HP\\Desktop\\notes.txt to C:\\Users\\HP\\Documents`\n"
-                "- `copy folder Projects to Downloads`\n"
-                "- `duplicate the file report.pdf to Desktop`"
-            ),
+            content="⚠️ **Please specify source and destination paths.**",
             status="error",
             steps=["Source or Destination Missing"],
         )
     src = Path(req.source).resolve()
     dst = Path(req.destination).resolve()
+
+    safe_src, r_src = _is_safe_target(src)
+    safe_dst, r_dst = _is_safe_target(dst)
+    if not safe_src or not safe_dst:
+        return FileOpResult(
+            success=False,
+            content=f"🔒 **Security Violation Blocked:** {r_src if not safe_src else r_dst}",
+            status="error",
+            steps=["Security Guard Triggered"],
+        )
+
     if dst.is_dir():
         dst = dst / src.name
-    sm.add_authorized_root(str(Path.home()))
+
+    if not sm.is_path_authorized(str(src)) or not sm.is_path_authorized(str(dst)):
+        return FileOpResult(
+            success=False,
+            content="🔒 **Access Denied:** Source or destination is outside your authorized workspaces.",
+            status="error",
+            steps=["Authorization Failed"],
+        )
+
     if not src.exists():
         return FileOpResult(
             success=False,
@@ -869,20 +991,32 @@ def _exec_rename(req: FileOpRequest) -> FileOpResult:
     if not req.source or not req.name:
         return FileOpResult(
             success=False,
-            content=(
-                "⚠️ **Please specify what to rename and the new name.**\n\n"
-                "**Examples:**\n"
-                "- `rename C:\\Users\\HP\\Desktop\\old.txt to new.txt`\n"
-                "- `rename folder Projects to MyProjects on Desktop`\n"
-                "- `change the name of notes.txt to meeting_notes.txt in Documents`"
-            ),
+            content="⚠️ **Please specify the file/folder to rename and its new name.**",
             status="error",
             steps=["Source or New Name Missing"],
         )
     src = Path(req.source).resolve()
-    new_name = req.name.strip().strip("\"'")
+    new_name = _sanitize_name(req.name)
     dst = src.parent / new_name
-    sm.add_authorized_root(str(Path.home()))
+
+    safe_src, r_src = _is_safe_target(src)
+    safe_dst, r_dst = _is_safe_target(dst)
+    if not safe_src or not safe_dst:
+        return FileOpResult(
+            success=False,
+            content=f"🔒 **Security Violation Blocked:** {r_src if not safe_src else r_dst}",
+            status="error",
+            steps=["Security Guard Triggered"],
+        )
+
+    if not sm.is_path_authorized(str(src)):
+        return FileOpResult(
+            success=False,
+            content=f"🔒 **Access Denied:** `{src}` is outside your authorized workspaces.",
+            status="error",
+            steps=["Authorization Failed"],
+        )
+
     if not src.exists():
         return FileOpResult(
             success=False,
@@ -921,8 +1055,40 @@ def _exec_rename(req: FileOpRequest) -> FileOpResult:
 
 
 def _exec_list(req: FileOpRequest) -> FileOpResult:
-    source = req.source or str(Path.home())
-    path = Path(source).resolve()
+    # If no target folder was explicitly provided, present the primary workspaces
+    if not req.source or Path(req.source).resolve() == Path.home():
+        lines = [
+            "### 📂 **Vault AI Authorized Workspaces**\n",
+            "Here are your authorized workspace directories:\n",
+            "| Workspace | Location | Description |",
+            "| :--- | :--- | :--- |",
+            f"| 🖥️ **Desktop** | `{Path.home() / 'Desktop'}` | Primary desktop files & shortcuts |",
+            f"| 📄 **Documents** | `{Path.home() / 'Documents'}` | Project documents & records |",
+            f"| 📥 **Downloads** | `{Path.home() / 'Downloads'}` | Incoming downloaded files |",
+            f"| 🖼️ **Pictures** | `{Path.home() / 'Pictures'}` | Images & media assets |",
+            f"| 🎵 **Music** | `{Path.home() / 'Music'}` | Audio files |",
+            f"| 🎬 **Videos** | `{Path.home() / 'Videos'}` | Video recordings |",
+            "\n> 💡 **Tip:** Ask `list files in Downloads` or `list files on Desktop` to view a specific folder.",
+            "> 🔒 **Security Notice:** Sensitive OS directories and system configuration files are protected and filtered out.",
+        ]
+        return FileOpResult(
+            success=True,
+            content="\n".join(lines),
+            steps=["Workspace Overview Retrieved", "Sensitive Directories Shielded"],
+        )
+
+    path = Path(req.source).resolve()
+
+    # Block direct listing of sensitive directories
+    safe, reason = _is_safe_target(path)
+    if not safe:
+        return FileOpResult(
+            success=False,
+            content=f"🔒 **Security Violation Blocked:** {reason}",
+            status="error",
+            steps=["Security Guard Triggered"],
+        )
+
     if not path.exists():
         return FileOpResult(
             success=False,
@@ -930,8 +1096,8 @@ def _exec_list(req: FileOpRequest) -> FileOpResult:
             status="error",
             steps=["Path Not Found"],
         )
+
     if not path.is_dir():
-        # It's a file — show its info
         stat = path.stat()
         ext = path.suffix.lower()
         return FileOpResult(
@@ -946,10 +1112,25 @@ def _exec_list(req: FileOpRequest) -> FileOpResult:
             ),
             steps=["File Info Retrieved"],
         )
+
     try:
         items = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-        folders = [i for i in items if i.is_dir() and not i.name.startswith(".")]
-        files = [i for i in items if i.is_file() and not i.name.startswith(".")]
+        
+        # Filter out hidden and sensitive/protected folders
+        folders = [
+            i for i in items
+            if i.is_dir()
+            and not i.name.startswith(".")
+            and not i.name.startswith("$")
+            and i.name.lower() not in PROTECTED_SYSTEM_DIRS
+        ]
+        files = [
+            i for i in items
+            if i.is_file()
+            and not i.name.startswith(".")
+            and not i.name.startswith("~$")
+            and not i.name.lower().startswith("ntuser.dat")
+        ]
 
         lines = [f"### 📂 **Contents of `{path.name}`**\n", f"**Location:** `{path}`\n"]
 
@@ -957,21 +1138,21 @@ def _exec_list(req: FileOpRequest) -> FileOpResult:
             lines.append(f"\n**📁 Folders ({len(folders)}):**\n")
             lines.append("| Folder Name |")
             lines.append("| :--- |")
-            for f in folders[:20]:
+            for f in folders[:25]:
                 lines.append(f"| 📁 `{f.name}` |")
-            if len(folders) > 20:
-                lines.append(f"| *(+{len(folders)-20} more)* |")
+            if len(folders) > 25:
+                lines.append(f"| *(+{len(folders)-25} more folders)* |")
 
         if files:
             lines.append(f"\n**📄 Files ({len(files)}):**\n")
             lines.append("| File Name | Type | Size |")
             lines.append("| :--- | :--- | :--- |")
-            for f in files[:30]:
+            for f in files[:35]:
                 size = _human_size(f.stat().st_size)
                 cat = get_file_category(f.suffix.lower())
                 lines.append(f"| `{f.name}` | {cat} | {size} |")
-            if len(files) > 30:
-                lines.append(f"| *(+{len(files)-30} more files)* | | |")
+            if len(files) > 35:
+                lines.append(f"| *(+{len(files)-35} more files)* | | |")
 
         if not folders and not files:
             lines.append("\n*This folder is empty.*")
@@ -979,7 +1160,7 @@ def _exec_list(req: FileOpRequest) -> FileOpResult:
         return FileOpResult(
             success=True,
             content="\n".join(lines),
-            steps=["Directory Read", f"Found {len(folders)} folders, {len(files)} files"],
+            steps=["Directory Scanned", f"Found {len(folders)} folders, {len(files)} files", "System Directories Shielded"],
         )
     except PermissionError:
         return FileOpResult(
@@ -991,9 +1172,18 @@ def _exec_list(req: FileOpRequest) -> FileOpResult:
 
 
 def _exec_search(req: FileOpRequest) -> FileOpResult:
-    source = req.source or str(Path.home())
+    source = req.source or str(Path.home() / "Documents")
     pattern = req.pattern or ""
     root = Path(source).resolve()
+
+    safe, reason = _is_safe_target(root)
+    if not safe:
+        return FileOpResult(
+            success=False,
+            content=f"🔒 **Security Violation Blocked:** {reason}",
+            status="error",
+            steps=["Security Guard Triggered"],
+        )
 
     if not root.exists():
         return FileOpResult(
@@ -1004,22 +1194,24 @@ def _exec_search(req: FileOpRequest) -> FileOpResult:
         )
 
     try:
-        # Build glob pattern
         if "*" in pattern or "?" in pattern:
             glob_pattern = pattern
         elif "." in pattern:
-            # e.g. "*.pdf" or just "pdf" or ".pdf"
             ext = pattern.lstrip("*").lstrip(".")
             glob_pattern = f"*.{ext}"
         else:
             glob_pattern = f"*{pattern}*"
 
         results = []
-        ignored = {".git", "__pycache__", ".venv", "node_modules", "AppData", "$RECYCLE.BIN"}
         for dirpath, dirs, files in os.walk(str(root)):
-            dirs[:] = [d for d in dirs if d not in ignored and not d.startswith(".")]
+            dirs[:] = [
+                d for d in dirs
+                if d not in PROTECTED_SYSTEM_DIRS
+                and not d.startswith(".")
+                and not d.startswith("$")
+            ]
             for fname in files:
-                if fname.startswith("."):
+                if fname.startswith(".") or fname.startswith("~$"):
                     continue
                 fpath = Path(dirpath) / fname
                 try:
@@ -1041,10 +1233,7 @@ def _exec_search(req: FileOpRequest) -> FileOpResult:
         if not results:
             return FileOpResult(
                 success=True,
-                content=(
-                    f"🔍 **No files found matching `{pattern}`** in `{root}`.\n\n"
-                    f"Try a different search term or location."
-                ),
+                content=f"🔍 **No files found matching `{pattern}`** in `{root}`.",
                 steps=["Search Complete", "No Results"],
             )
 
@@ -1056,8 +1245,6 @@ def _exec_search(req: FileOpRequest) -> FileOpResult:
         ]
         for r in results:
             lines.append(f"| `{r['name']}` | {r['type']} | {r['size']} | `{r['path']}` |")
-        if len(results) == 50:
-            lines.append(f"\n*Showing first 50 results. Narrow your search for more precision.*")
 
         return FileOpResult(
             success=True,
@@ -1074,8 +1261,18 @@ def _exec_search(req: FileOpRequest) -> FileOpResult:
 
 
 def _exec_open(req: FileOpRequest) -> FileOpResult:
-    source = req.source or str(Path.home())
+    source = req.source or str(Path.home() / "Documents")
     path = Path(source).resolve()
+
+    safe, reason = _is_safe_target(path)
+    if not safe:
+        return FileOpResult(
+            success=False,
+            content=f"🔒 **Security Violation Blocked:** {reason}",
+            status="error",
+            steps=["Security Guard Triggered"],
+        )
+
     if not path.exists():
         return FileOpResult(
             success=False,
@@ -1100,7 +1297,7 @@ def _exec_open(req: FileOpRequest) -> FileOpResult:
 
 
 # ---------------------------------------------------------------------------
-# Main dispatcher
+# Main Dispatcher
 # ---------------------------------------------------------------------------
 
 _EXECUTORS = {
@@ -1117,19 +1314,8 @@ _EXECUTORS = {
 
 
 def execute_file_query(query: str) -> Optional[Dict[str, Any]]:
-    """
-    Main entry point: parse a natural language file query and execute it.
-
-    Returns a response dict (role/content/intent/status/steps) ready for the UI,
-    or None if no file operation was detected.
-    """
+    """Main entry point: parse natural language file query and execute safely."""
     req = parse_file_operation(query)
-
-    # If regex parse failed or detected unknown, try LLM
-    if req.operation == "unknown":
-        llm_req = parse_with_llm(query)
-        if llm_req and llm_req.operation != "unknown":
-            req = llm_req
 
     if req.operation not in _EXECUTORS:
         return None
