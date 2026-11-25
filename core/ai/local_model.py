@@ -12,29 +12,21 @@ from typing import Any, Callable
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}/api/chat"
 OLLAMA_TAGS_URL = f"{OLLAMA_BASE_URL}/api/tags"
-DEFAULT_LOCAL_MODEL = "qwen3:4b"
-# qwen3:4b is currently the Thinking-2507 tag on this Ollama installation.
-# CPU-only inference can take longer than a normal HTTP request while it reaches
-# its final answer, so this is deliberately longer than the availability probe.
+DEFAULT_LOCAL_MODEL = "qwen3:8b"
 REQUEST_TIMEOUT_SECONDS = 180
 MAX_RESPONSE_TOKENS = 8192
 
-# ENABLE_THINKING = True: Qwen3's chain-of-thought reasoning is routed by
-# Ollama into the separate message.thinking field. Our code reads only
-# message.content, so the UI always receives a clean answer with no reasoning
-# preamble. The token budget must be large enough for BOTH thinking + answer
-# (8192 covers typical reasoning sessions without running out of budget).
 ENABLE_THINKING = True
 
-SYSTEM_PROMPT = """You are Vault AI — a secure, offline-first desktop AI assistant powered by Qwen3 4B running locally via Ollama.
+SYSTEM_PROMPT = """You are Vault AI — a secure, offline-first desktop AI assistant powered by Qwen3 8B running locally via Ollama.
 
 Identity (always accurate):
-- You are Qwen3 4B by Alibaba's Tongyi Lab, running 100% locally — no cloud, no internet.
+- You are Qwen3 8B by Alibaba's Tongyi Lab, running 100% locally — no cloud, no internet.
 - Vault AI is built with Python + PySide6 (Qt). It uses TPM/ECDSA P-256 for device identity.
 - Qwen3 IS active and fully working right now. Never say it is "not implemented".
 
 Capabilities routed by Vault AI's engine:
-- General Q&A, reasoning, explanation → you (Qwen3 4B)
+- General Q&A, reasoning, explanation → you (Qwen3 8B)
 - CPU / RAM / system monitoring → Vault AI's system tools
 - File search and organisation → Vault AI's file tools
 - Device security / TPM checks → Vault AI's security backend

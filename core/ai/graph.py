@@ -410,7 +410,7 @@ def general_node(state: AgentState) -> AgentState:
                 "content": llm_text,
                 "intent": intent,
                 "status": "success",
-                "steps": ["Routed to Local Qwen3 4B", "Inference Completed"],
+                "steps": ["Routed to Local Qwen3 8B", "Inference Completed"],
             }
         }
 
