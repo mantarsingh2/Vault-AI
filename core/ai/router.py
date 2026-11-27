@@ -31,6 +31,14 @@ _SECURITY_PATTERNS = [
     r"\b(scan\s+(for\s+)?(malware|virus|threats?)|(malware|virus|defender)\s+scan)\b",
     r"\b(run (a )?(malware|virus|security|defender) scan|scan (my )?(laptop|pc|computer|system) for (malware|viruses))\b",
     r"\b(check firewall|firewall status|firewall profile|antivirus status|defender status|bitlocker status)\b",
+    # Emergency Kill-Switch & Air-Gap Containment
+    r"\b(disconnect|cut|block|stop|kill|disable|shut(?:down)?)\b.*?\b(wireless|wifi|wi-fi|bluetooth|network|connections?|air[- ]?gap)\b",
+    r"\b(air[- ]?gap\s+(my\s+)?(laptop|pc|computer|system)|kill[- ]?switch|emergency\s+stop)\b",
+    r"\b(restore|re-?enable|reconnect|enable|bring back)\b.*?\b(wireless|wifi|wi-fi|bluetooth|network|connections?)\b",
+    # Attack Detection, Threat Hunting & SOC Analyst
+    r"\b(detect|hunt|check|stop|handle|triage)\b.*?\b(attacks?|intrusions?|hackers?|threats?|c2|reverse\s+shell|payload|suspicious\s+activity)\b",
+    r"\b(is\s+(an\s+)?attacker\s+attacking|handle\s+attack|stop\s+all\s+wireless|cut\s+off\s+wireless)\b",
+    r"\b(threat\s+hunt|threat\s+hunting|attack\s+detection|intrusion\s+detection|soc\s+analyst)\b",
 ]
 
 _SYSTEM_PATTERNS = [

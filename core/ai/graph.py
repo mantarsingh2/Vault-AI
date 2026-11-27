@@ -269,15 +269,92 @@ def system_node(state: AgentState) -> AgentState:
 # ---------------------------------------------------------------------------
 
 def security_node(state: AgentState) -> AgentState:
-    """Execute live security audits, malware scans, or device TPM checks."""
+    """Execute live security audits, emergency wireless killswitch, threat detection, or TPM checks."""
     import re as _re
     from core.device import get_hardware_identifiers, get_key_storage_info  # noqa: PLC0415
     from core.security.auditor import audit_laptop_security, execute_malware_scan  # noqa: PLC0415
+    from core.security.analyst import (  # noqa: PLC0415
+        analyze_security_threats,
+        trigger_emergency_killswitch,
+        trigger_restore_wireless,
+    )
 
     user_query = state.get("user_query", "").lower()
     intent = state.get("intent", Intent.SECURITY_CHECK.value)
 
-    # 1. On-demand live malware quick scan execution
+    # 1. Emergency Wireless Kill-Switch / Air-Gap Isolation
+    is_killswitch = any(k in user_query for k in [
+        "disconnect all wireless", "disconnect wireless", "kill wireless", "cut off wireless",
+        "stop all wireless", "air gap", "airgap", "kill switch", "killswitch", "isolate wireless",
+        "disable wireless", "disable wifi", "stop wireless"
+    ]) and not any(k in user_query for k in ["restore", "reconnect", "re-enable", "enable", "how"])
+
+    if is_killswitch:
+        ks_res = trigger_emergency_killswitch(reason="Operator emergency air-gap initiated via Vault AI chat")
+        return {
+            "response": {
+                "role": "assistant",
+                "content": ks_res["summary"],
+                "intent": intent,
+                "status": "success",
+                "steps": [
+                    "Deployed Outbound Firewall Block Rule",
+                    "Disabled 802.11/WWAN Network Adapters",
+                    "Powered Off Bluetooth Transceivers",
+                    "Terminated Active Foreign Sockets",
+                ],
+            }
+        }
+
+    # 2. Restore Wireless Connectivity
+    is_restore = any(k in user_query for k in [
+        "restore wireless", "restore wifi", "reconnect wireless", "reconnect wifi",
+        "re-enable wifi", "re-enable wireless", "enable wifi", "enable wireless",
+        "bring back wireless", "bring back wifi"
+    ])
+
+    if is_restore:
+        rst_res = trigger_restore_wireless()
+        return {
+            "response": {
+                "role": "assistant",
+                "content": rst_res["summary"],
+                "intent": intent,
+                "status": "success",
+                "steps": [
+                    "Removed Emergency Firewall Isolation Rule",
+                    "Re-enabled Wi-Fi Network Adapters",
+                    "Restored Bluetooth Radio Transceivers",
+                ],
+            }
+        }
+
+    # 3. Active Threat Hunt & Intrusion Detection (SOC Analyst + Qwen3 8B)
+    is_threat_hunt = any(k in user_query for k in [
+        "threat hunt", "hunt threats", "detect attack", "detect attacks", "intrusion",
+        "attacker", "hacker", "suspicious activity", "soc analyst", "handle attack",
+        "c2", "reverse shell", "check attack"
+    ])
+
+    if is_threat_hunt:
+        auto_isolate = any(k in user_query for k in ["contain", "isolate", "stop it", "stop attack"])
+        hunt_res = analyze_security_threats(auto_isolate=auto_isolate)
+        return {
+            "response": {
+                "role": "assistant",
+                "content": hunt_res["summary"],
+                "intent": intent,
+                "status": "success",
+                "steps": [
+                    "Scanned Active Process Trees for Anomaly & Obfuscation",
+                    "Inspected Listening & Outbound Socket Telemetry",
+                    "Evaluated Sigma Behavioral Rules (MITRE ATT&CK)",
+                    "Performed Forensic Triage via Local Qwen3 8B",
+                ],
+            }
+        }
+
+    # 4. On-demand live malware quick scan execution
     if any(k in user_query for k in ["scan for malware", "malware scan", "virus scan", "defender scan"]):
         scan_res = execute_malware_scan()
         if scan_res.get("success"):
@@ -303,7 +380,7 @@ def security_node(state: AgentState) -> AgentState:
             }
         }
 
-    # 2. Live Laptop Security Audit & Implementation Check
+    # 5. Live Laptop Security Audit & Implementation Check
     is_audit_query = any(k in user_query for k in [
         "check", "audit", "verify", "implemented", "laptop security", "pc security",
         "firewall", "defender", "antivirus", "bitlocker", "can you do it"
@@ -324,7 +401,7 @@ def security_node(state: AgentState) -> AgentState:
             }
         }
 
-    # 3. Pure TPM Device Identity check
+    # 6. Pure TPM Device Identity check
     sec_info = get_key_storage_info()
     hw_ids = get_hardware_identifiers()
     provider_label = (
@@ -563,14 +640,23 @@ def _build_graph() -> Optional[Any]:
     return workflow.compile()
 
 
+class _FallbackGraph:
+    """Provides .invoke(state) fallback when langgraph runtime is not installed."""
+    def invoke(self, state: AgentState) -> Dict[str, Any]:
+        return direct_execute(state)
+
+
 _compiled_graph = None
 
 
 def get_agent_graph():
-    """Return the compiled StateGraph if LangGraph is available, else None."""
+    """Return the compiled StateGraph if LangGraph is available, else fallback runner."""
     global _compiled_graph
-    if _compiled_graph is None and HAS_LANGGRAPH:
-        _compiled_graph = _build_graph()
+    if _compiled_graph is None:
+        if HAS_LANGGRAPH:
+            _compiled_graph = _build_graph()
+        if _compiled_graph is None:
+            _compiled_graph = _FallbackGraph()
     return _compiled_graph
 
 
