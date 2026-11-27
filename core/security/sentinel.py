@@ -96,10 +96,6 @@ class TelemetrySentinel:
 
         for conn in connections:
             try:
-                # We care primarily about outbound/established connections with remote address
-                if not conn.raddr:
-                    continue
-
                 pid = conn.pid
                 if not pid:
                     continue
@@ -111,9 +107,15 @@ class TelemetrySentinel:
                         pname_cache[pid] = "Unknown"
 
                 proc_name = pname_cache[pid]
-                remote_ip = conn.raddr.ip
-                remote_port = conn.raddr.port
                 status = conn.status
+
+                local_port = conn.laddr.port if conn.laddr else None
+                remote_ip = conn.raddr.ip if conn.raddr else ""
+                remote_port = conn.raddr.port if conn.raddr else 0
+
+                # Must have at least a local listening port or an outbound remote address
+                if not local_port and not remote_ip:
+                    continue
 
                 net_alerts = self.sigma.evaluate_connection(
                     image_name=proc_name,
@@ -121,6 +123,7 @@ class TelemetrySentinel:
                     remote_ip=remote_ip,
                     remote_port=remote_port,
                     status=status,
+                    local_port=local_port,
                 )
 
                 if net_alerts:
@@ -128,8 +131,8 @@ class TelemetrySentinel:
                     scanned.append({
                         "pid": pid,
                         "process": proc_name,
-                        "remote_ip": remote_ip,
-                        "remote_port": remote_port,
+                        "remote_ip": remote_ip or "0.0.0.0",
+                        "remote_port": remote_port or local_port,
                         "status": status,
                         "alerts": [a.rule_name for a in net_alerts],
                     })

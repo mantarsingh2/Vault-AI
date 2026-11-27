@@ -77,6 +77,23 @@ class TestSigmaEngine:
         assert alert.severity == ThreatSeverity.CRITICAL
         assert alert.recommended_action == "ISOLATE_WIRELESS"
 
+    def test_listening_backdoor_socket(self):
+        """PowerShell listening on port 4444 should trigger SIGMA-004 listener alert."""
+        alerts = self.engine.evaluate_connection(
+            image_name="powershell.exe",
+            pid=4568,
+            remote_ip="",
+            remote_port=0,
+            status="LISTEN",
+            local_port=4444,
+        )
+        assert len(alerts) >= 1
+        rule_ids = [a.rule_id for a in alerts]
+        assert "SIGMA-004" in rule_ids
+        alert = alerts[0]
+        assert alert.severity == ThreatSeverity.CRITICAL
+        assert alert.recommended_action == "ISOLATE_WIRELESS"
+
     def test_benign_developer_process_no_false_positive(self):
         """Normal developer activity should not trigger Sigma rules."""
         alerts = self.engine.evaluate_process(
@@ -141,6 +158,18 @@ class TestRouterSecurityPatterns:
             "detect attacks",
             "check intrusion",
             "is an attacker attacking",
+        ]
+        for q in queries:
+            assert classify_intent(q) == Intent.SECURITY_CHECK, f"Failed for {q}"
+
+    def test_security_audit_queries(self):
+        queries = [
+            "security check",
+            "security audit",
+            "check security",
+            "laptop security",
+            "secure boot",
+            "check secure boot status",
         ]
         for q in queries:
             assert classify_intent(q) == Intent.SECURITY_CHECK, f"Failed for {q}"

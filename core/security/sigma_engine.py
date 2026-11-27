@@ -77,6 +77,8 @@ SIGMA_RULES = [
             r"invoke-webrequest|iwr\b",
             r"net\.webclient",
             r"bypass\s+-nop",
+            r"tcplistener|tcpclient",
+            r"system\.net\.sockets",
         ],
     },
     {
@@ -211,35 +213,52 @@ class SigmaEngine:
         remote_ip: str,
         remote_port: int,
         status: str = "ESTABLISHED",
+        local_port: Optional[int] = None,
     ) -> List[ThreatAlert]:
-        """Match an outbound socket connection against network Sigma rules."""
+        """Match an outbound socket connection or suspicious listening socket against network Sigma rules."""
         alerts: List[ThreatAlert] = []
         image_lower = (image_name or "").lower().strip()
 
-        # Skip local/loopback traffic
-        if remote_ip in ("127.0.0.1", "::1", "0.0.0.0", "localhost"):
-            return alerts
-
         for r in self.rules:
-            # Rule 4: C2 / Reverse shell ports from script interpreters
+            # Rule 4: C2 / Reverse shell / Bind shell ports from script interpreters
             if "suspicious_ports" in r and "shell_images" in r:
                 if any(image_lower.endswith(s) for s in r["shell_images"]):
-                    # Shell with ANY external connection or suspicious port
-                    if remote_port in r["suspicious_ports"] or remote_port > 1024:
-                        alerts.append(ThreatAlert(
-                            rule_id=r["id"],
-                            rule_name=r["name"],
-                            severity=r["severity"],
-                            description=r["description"],
-                            matched_data={
-                                "process": image_name,
-                                "pid": pid,
-                                "remote_ip": remote_ip,
-                                "remote_port": remote_port,
-                                "status": status,
-                            },
-                            mitre_attack=r["mitre"],
-                            recommended_action=r["action"],
-                        ))
+                    # 1. Listening socket check (Bind Shell / Backdoor Listener)
+                    if status == "LISTEN" and local_port:
+                        if local_port in r["suspicious_ports"]:
+                            alerts.append(ThreatAlert(
+                                rule_id=r["id"],
+                                rule_name=f"{r['name']} (Listening Backdoor)",
+                                severity=r["severity"],
+                                description=f"Script engine '{image_name}' opened an unauthorized listening socket on port {local_port}.",
+                                matched_data={
+                                    "process": image_name,
+                                    "pid": pid,
+                                    "local_port": local_port,
+                                    "status": status,
+                                },
+                                mitre_attack=["T1059.001", "T1571"],
+                                recommended_action=r["action"],
+                            ))
+                            continue
+
+                    # 2. Outbound socket check (C2 / Reverse Shell)
+                    if remote_ip and remote_ip not in ("127.0.0.1", "::1", "0.0.0.0", "localhost"):
+                        if remote_port in r["suspicious_ports"] or remote_port > 1024:
+                            alerts.append(ThreatAlert(
+                                rule_id=r["id"],
+                                rule_name=r["name"],
+                                severity=r["severity"],
+                                description=r["description"],
+                                matched_data={
+                                    "process": image_name,
+                                    "pid": pid,
+                                    "remote_ip": remote_ip,
+                                    "remote_port": remote_port,
+                                    "status": status,
+                                },
+                                mitre_attack=r["mitre"],
+                                recommended_action=r["action"],
+                            ))
 
         return alerts

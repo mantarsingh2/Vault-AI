@@ -25,12 +25,15 @@ _CONFIRM_PATTERNS = [
 ]
 
 _SECURITY_PATTERNS = [
-    r"\b(tpm|device security|cryptographic key|device key|security status|device identity|fingerprint)\b",
-    r"\b(audit|verify|check|inspect|test|implement)\b.*?\b(security|antivirus|defender|firewall|bitlocker|encryption|protection)\b",
+    r"\b(tpm|device security|cryptographic key|device key|security status|device identity|fingerprint|secure boot)\b",
+    r"\b(laptop|pc|computer|system|device)\s+(security|protection)\b",
+    r"\b(security|antivirus|defender|firewall|bitlocker|encryption|protection|secure boot)\b.*?\b(audit|verify|check|inspect|test|status|implement|report)\b",
+    r"\b(audit|verify|check|inspect|test|implement)\b.*?\b(security|antivirus|defender|firewall|bitlocker|encryption|protection|secure boot)\b",
+    r"^security(\s+check|\s+audit|\s+status)?$",
     r"\b(can you do it and check|check (it )?w(h)?ether it (is )?already implemented|is security (implemented|enabled|active))\b",
     r"\b(scan\s+(for\s+)?(malware|virus|threats?)|(malware|virus|defender)\s+scan)\b",
     r"\b(run (a )?(malware|virus|security|defender) scan|scan (my )?(laptop|pc|computer|system) for (malware|viruses))\b",
-    r"\b(check firewall|firewall status|firewall profile|antivirus status|defender status|bitlocker status)\b",
+    r"\b(check firewall|firewall status|firewall profile|antivirus status|defender status|bitlocker status|secure boot status)\b",
     # Emergency Kill-Switch & Air-Gap Containment
     r"\b(disconnect|cut|block|stop|kill|disable|shut(?:down)?)\b.*?\b(wireless|wifi|wi-fi|bluetooth|network|connections?|air[- ]?gap)\b",
     r"\b(air[- ]?gap\s+(my\s+)?(laptop|pc|computer|system)|kill[- ]?switch|emergency\s+stop)\b",

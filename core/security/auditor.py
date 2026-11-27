@@ -198,6 +198,30 @@ def check_system_integrity() -> Dict[str, Any]:
     }
 
 
+def check_secure_boot() -> Dict[str, Any]:
+    """Query live Windows UEFI Secure Boot state from Windows Registry & API."""
+    if sys.platform != "win32":
+        return {"status": "unknown", "enabled": False, "label": "Non-Windows Platform"}
+
+    # 1. Registry query: HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State -> UEFISecureBootEnabled
+    cmd = "(Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\SecureBoot\\State' -ErrorAction SilentlyContinue).UEFISecureBootEnabled"
+    raw = _run_ps_command(cmd, timeout=3).strip()
+    if raw in ("1", "True"):
+        return {"status": "enabled", "enabled": True, "label": "Active (UEFI Secure Boot Enforced)"}
+    elif raw in ("0", "False"):
+        return {"status": "disabled", "enabled": False, "label": "Disabled / Off (Not Active in BIOS/UEFI)"}
+
+    # 2. Fallback via Confirm-SecureBootUEFI
+    fb_cmd = "Confirm-SecureBootUEFI -ErrorAction SilentlyContinue"
+    fb_raw = _run_ps_command(fb_cmd, timeout=3).strip().lower()
+    if fb_raw == "true":
+        return {"status": "enabled", "enabled": True, "label": "Active (UEFI Secure Boot Enforced)"}
+    elif fb_raw == "false":
+        return {"status": "disabled", "enabled": False, "label": "Disabled / Off (Not Active in BIOS/UEFI)"}
+
+    return {"status": "disabled", "enabled": False, "label": "Disabled / Off"}
+
+
 def execute_malware_scan() -> Dict[str, Any]:
     """Trigger a live Windows Defender Quick Scan."""
     if sys.platform != "win32":
@@ -219,10 +243,11 @@ def execute_malware_scan() -> Dict[str, Any]:
 
 def audit_laptop_security() -> Dict[str, Any]:
     """
-    Run the full live laptop security audit across all 6 core domains.
+    Run the full live laptop security audit across all core security domains.
     Returns structured results and formatted Markdown for UI presentation.
     """
     tpm = check_tpm_security()
+    secure_boot = check_secure_boot()
     defender = check_windows_defender()
     firewall = check_windows_firewall()
     encryption = check_drive_encryption()
@@ -231,15 +256,17 @@ def audit_laptop_security() -> Dict[str, Any]:
 
     # Calculate overall security score out of 100
     score = 0
-    if tpm["hardware_backed"]: score += 20
-    if defender["realtime_protection"]: score += 25
+    if tpm["hardware_backed"]: score += 15
+    if secure_boot["enabled"]: score += 15
+    if defender["realtime_protection"]: score += 20
     if firewall["all_enabled"]: score += 20
-    if encryption["status"] == "encrypted": score += 15
+    if encryption["status"] == "encrypted": score += 10
     if not privileges["is_admin"]: score += 10
     if integrity["status"] == "healthy": score += 10
 
     # Build Markdown Report
     tpm_icon = "✅" if tpm["hardware_backed"] else "ℹ️"
+    sb_icon = "✅" if secure_boot["enabled"] else "⚠️"
     def_icon = "✅" if defender["realtime_protection"] else "⚠️"
     fw_icon = "✅" if firewall["all_enabled"] else "⚠️"
     enc_icon = "✅" if encryption["status"] == "encrypted" else "⚠️"
@@ -254,11 +281,12 @@ def audit_laptop_security() -> Dict[str, Any]:
         "| Security Layer | Current Status | Live Diagnostic Details |",
         "| :--- | :--- | :--- |",
         f"| **1. Hardware TPM 2.0** | {tpm_icon} {'Hardware Verified' if tpm['hardware_backed'] else 'Software Provider'} | `{tpm['label']}` (NIST P-256 bound) |",
-        f"| **2. Antivirus & Defender** | {def_icon} {'Active & Protected' if defender['realtime_protection'] else 'Check Required'} | `{defender['name']}` (Real-time Protection: {'On' if defender['realtime_protection'] else 'Off'}) |",
-        f"| **3. Windows Firewall** | {fw_icon} {'Enforced' if firewall['all_enabled'] else 'Partial'} | `{fw_detail}` |",
-        f"| **4. Drive Encryption** | {enc_icon} {encryption['protection_status']} | BitLocker C: status: `{encryption['protection_status']}` |",
-        f"| **5. User Account Boundary** | {priv_icon} {'Least Privilege' if not privileges['is_admin'] else 'Elevated Admin'} | `{privileges['username']}` — `{privileges['privilege_level']}` |",
-        f"| **6. System & Process Load** | {int_icon} {'Healthy' if integrity['status'] == 'healthy' else 'High Load'} | CPU: `{integrity['cpu_percent']}%`, RAM: `{integrity['ram_percent']}%` |",
+        f"| **2. UEFI Secure Boot** | {sb_icon} {'Active & Enforced' if secure_boot['enabled'] else 'Disabled / Off'} | `{secure_boot['label']}` |",
+        f"| **3. Antivirus & Defender** | {def_icon} {'Active & Protected' if defender['realtime_protection'] else 'Check Required'} | `{defender['name']}` (Real-time Protection: {'On' if defender['realtime_protection'] else 'Off'}) |",
+        f"| **4. Windows Firewall** | {fw_icon} {'Enforced' if firewall['all_enabled'] else 'Partial'} | `{fw_detail}` |",
+        f"| **5. Drive Encryption** | {enc_icon} {encryption['protection_status']} | BitLocker C: status: `{encryption['protection_status']}` |",
+        f"| **6. User Account Boundary** | {priv_icon} {'Least Privilege' if not privileges['is_admin'] else 'Elevated Admin'} | `{privileges['username']}` — `{privileges['privilege_level']}` |",
+        f"| **7. System & Process Load** | {int_icon} {'Healthy' if integrity['status'] == 'healthy' else 'High Load'} | CPU: `{integrity['cpu_percent']}%`, RAM: `{integrity['ram_percent']}%` |",
         "\n---",
         "### 🚀 **Automated Actions Available to Execute Right Now:**",
         "- 🔍 **Run Live Antivirus Scan:** Reply `scan my laptop for malware` to trigger an immediate Windows Defender Quick Scan.",
